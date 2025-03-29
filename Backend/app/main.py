@@ -3,8 +3,9 @@ from typing import Annotated
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, ConfigDict
 from database import SessionLocal, engine
-import models
+import models.models as models
 from fastapi.middleware.cors import CORSMiddleware
+from api import api_router
 
 app = FastAPI()
 models.Base.metadata.create_all(bind=engine)
@@ -21,6 +22,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register API router
+app.include_router(api_router, prefix="/api/v1")
 
 class ConferenceBase(BaseModel):
     name: str
