@@ -1,3 +1,4 @@
+import sys
 from fastapi import FastAPI, HTTPException, Depends
 from typing import Annotated
 from sqlalchemy.orm import Session
@@ -6,6 +7,19 @@ from database import SessionLocal, engine
 import models.models as models
 from fastapi.middleware.cors import CORSMiddleware
 from api import api_router
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('app.log')
+    ]
+)
+# Create logger for this module
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 models.Base.metadata.create_all(bind=engine)
