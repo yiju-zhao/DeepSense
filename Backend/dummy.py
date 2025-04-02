@@ -294,7 +294,7 @@ async def chat(message: ChatMessage):
 @app.get("/api/v1/audio")
 async def get_audio():
     # For demo purposes, we'll serve a static audio file
-    audio_path = Path(__file__).parent.parent / "frontend/assets/audio/new-divide.mp3"
+    audio_path = Path(__file__).parent.parent / "Frontend/public/assets/audio/new-divide.mp3"
     
     if not audio_path.exists():
         return Response(content="Audio file not found", status_code=404)
