@@ -1,50 +1,70 @@
-from fastapi import FastAPI, HTTPException, Depends
-from typing import Annotated
-from sqlalchemy.orm import Session
-from pydantic import BaseModel, ConfigDict
-from database import SessionLocal, engine
-import models
+import logging
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()
-models.Base.metadata.create_all(bind=engine)
+from app.api import api_router, add_error_handlers, add_logging_middleware
+from app.core.config import settings
+from app.core.logging import setup_logging
 
-origins = [
-    "http://localhost:3000",
-]
+# Set up logging
+setup_logging()
+logger = logging.getLogger("deepsight")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# Create FastAPI application
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    openapi_url=f"{settings.API_V1_STR}/openapi.json",
+    docs_url=f"{settings.API_V1_STR}/docs",
+    redoc_url=f"{settings.API_V1_STR}/redoc",
 )
 
+# Set up CORS
+if settings.BACKEND_CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[str(origin) for origin in settings.BACKEND_CORS_ORIGINS],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-class ConferenceBase(BaseModel):
-    name: str
-    type: str
-    description: str
+# Add logging middleware
+add_logging_middleware(app)
 
-class ConferenceModel(ConferenceBase):
-    conference_id: int
+# Add error handlers
+add_error_handlers(app)
 
-    model_config = ConfigDict(from_attributes=True)
+# Include API router
+app.include_router(api_router, prefix=settings.API_V1_STR)
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
-db_dependency = Annotated[Session, Depends(get_db)]
+@app.get("/")
+async def root():
+    """
+    Root endpoint.
+    """
+    return {
+        "status": "success",
+        "message": f"Welcome to {settings.PROJECT_NAME} API",
+        "version": "0.1.0",
+        "docs": f"{settings.API_V1_STR}/docs",
+    }
 
-@app.post("/conferences", response_model=ConferenceModel)
-async def create_conference(db: db_dependency, conference: ConferenceBase):
-    db_conference = models.Conference(**conference.model_dump())
-    db.add(db_conference)
-    db.commit()
-    db.refresh(db_conference)
-    return db_conference
+
+@app.get("/health")
+async def health():
+    """
+    Health check endpoint.
+    """
+    return {
+        "status": "success",
+        "message": "Healthy",
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    logger.info(f"Starting {settings.PROJECT_NAME} API")
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
