@@ -29,6 +29,14 @@ import requests
 from .base_crawler import ApiArgs, BaseCrawler
 import xml.etree.ElementTree as ET
 
+# Configure the logging format to include the timestamp
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO,  # Set the logging level as needed
+    datefmt='%Y-%m-%d %H:%M:%S'  # Customize the timestamp format
+)
+
+# Create a logger instance
 logger = logging.getLogger(__name__)
 
 class ArxivApiArgs(ApiArgs):
@@ -101,10 +109,18 @@ class ArxivCrawler(BaseCrawler):
                 term = cat.attrib.get("term")
                 if term:
                     categories.append(term)
+            # find PDF url: <link title="pdf" href="http://arxiv.org/pdf/1504.01441v3" rel="related" type="application/pdf"/>
+            pdf_url = ""
+            for link in entry.findall("atom:link", ns):
+                if (link.attrib.get("type") == "application/pdf" and 
+                    link.attrib.get("title") == "pdf"):
+                    pdf_url = link.attrib["href"]
+                    break  # 找到就跳出循环
         
             paper = {
-                "arxiv_id": entry.find("atom:id", ns).text,
+                "arxiv_id": entry.find("atom:id", ns).text.rsplit('/', 1)[-1], # 只保留数字ID部分：比如1504.01441v3
                 "title": entry.find("atom:title", ns).text,
+                "pdf_url": pdf_url,
                 "published": entry.find("atom:published", ns).text,
                 "summary": entry.find("atom:summary", ns).text.strip() if entry.find("atom:summary", ns) is not None else "",
                 "authors": [],

@@ -10,7 +10,7 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 from core.arxiv_crawler import ArxivApiArgs, ArxivCrawler
 from database import SessionLocal
-from models.tasks import ArxivPaper, CrawlerTask, CrawlerTaskActionResponse, CrawlerTaskCreate, CrawlerTaskList, CrawlerTaskResponse, CrawlerTaskUpdate, TaskExecution, TaskExecutionList, TaskExecutionResponse, TaskStatus
+from models.tasks import ArxivPaper, CrawlerTask, CrawlerTaskActionResponse, CrawlerTaskCreate, CrawlerTaskList, CrawlerTaskResponse, CrawlerTaskUpdate, Publication, TaskExecution, TaskExecutionList, TaskExecutionResponse, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,6 @@ def get_tasks(db: db_dependency, skip: int = Query(0), limit: int = Query(100)):
     """
     Retrieve crawler tasks.
     """
-    session = SessionLocal()
     tasks = db.query(CrawlerTask).offset(skip).limit(limit).all()
     return CrawlerTaskList(data=tasks, count=len(tasks))
 
@@ -77,6 +76,14 @@ def get_task_execution(
             detail=f"Task execution record with ID {execution_id} not found"
         )
     return execution
+
+@router.get("/crawler/{task_id}", response_model=CrawlerTaskResponse)
+def get_task(db: db_dependency, task_id: int):
+    task = db.query(CrawlerTask).filter(CrawlerTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
 
 @router.get("/crawler/{task_id}", response_model=CrawlerTaskResponse)
 def get_task(db: db_dependency, task_id: int):
@@ -153,6 +160,58 @@ async def task_action(db: db_dependency, task_id: int, action: str, background_t
     db.commit()
     return {"message": f"Task {action}ed successfully", "task_id": task_id}
 
+
+@router.post("/paper/{paper_id}/review", response_model=TaskExecutionResponse)
+def paper_review_by_id(
+    db: db_dependency,
+    paper_id: int
+):
+    """
+    review a paper, add a comments and score, by paper id
+    """
+    # 从ArxivPaper 表中根据ID查询，如果该ID已经存在于Publication，说明我处理过了，直接返回，并跳过
+    # 查询 ArxivPaper 表，并左连接 Publication 表
+    paper = (
+        db.query(ArxivPaper)
+        .outerjoin(Publication, ArxivPaper.id == Publication.id)
+        .filter(Publication.id == paper_id)
+        .add_columns(Publication.id)
+        .first()
+    )
+
+    # 检查是否在 Publication 表中已存在对应的 id
+    if paper and paper.paper_id is not None:
+        # 该 ID 已存在于 Publication 表中，说明已处理过，直接返回或跳过
+        return
+    else:
+        # 该 ID 不存在于 Publication 表中，继续处理
+        # TODO 在此处添加您的处理逻辑
+        pass
+
+@router.post("/paper/batch_review", response_model=TaskExecutionResponse)
+def paper_review_batch_execution(
+    db: db_dependency
+):
+    """
+    review a paper, add a comments and score, in a batch way
+    """
+    unprocessed_papers = (
+        db.query(ArxivPaper)
+        .outerjoin(Publication, ArxivPaper.id == Publication.id)
+        .filter(Publication.id.is_(None))
+        .add_columns(Publication.id)
+        .all()
+    )# 检查 unprocessed_papers 是否为空
+    if unprocessed_papers:
+        # 遍历所有未处理的论文
+        for paper in unprocessed_papers:
+            # 在此处添加处理每篇论文的逻辑
+            process_paper(paper)
+    else:
+        print("没有未处理的论文。")
+
+
+
 # 辅助函数：追加日志信息
 def append_log(current_log: str, new_message: str) -> str:
     if current_log:
@@ -191,6 +250,7 @@ async def execute_task(task_id: int):
         task.start_time = datetime.now()
         execution.status = TaskStatus.running.value
         execution.log = append_log(execution.log, f"任务开始执行: {task.name}")
+        execution.log = append_log(execution.log, f"arguments: {task.parameters}")
         db.commit()  # 立即提交状态更新
         
         result = func(task) # 执行任务函数
