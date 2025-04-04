@@ -198,6 +198,17 @@ DUMMY_PAPERS = [
         keywords=["Perceive, Reason, Imagine, Act via Holistic Language and Vision Planning for Manipulation"],
         citations=100,
         organization="University of Pennsylvania"
+    ),
+    Paper(
+        id="5",
+        title="How We Design Tools for Technical Insight Team",
+        authors=["Yuhe Chen", "Eason Zhao", "Jiwen Yu"],
+        conference="NeurIPS",
+        year=2025,
+        abstract="This paper discusses the design and implementation of tools for technical insight teams...",
+        keywords=["LLM, Tools, Technical Insight"],
+        citations=0,
+        organization="University of Toronto"
     )
 ]
 

@@ -7,6 +7,8 @@ import { DeepSight } from './pages/DeepSight';
 import { DailyPaper } from './pages/DailyPaper';
 import { DailyNews } from './pages/DailyNews';
 import { DeepDive } from './pages/DeepDive';
+import { Dashboard } from './pages/Dashboard';
+import { Dataset } from './pages/Dataset';
 
 const queryClient = new QueryClient();
 
@@ -18,22 +20,13 @@ function App() {
               <BrowserRouter>
                   <Layout>
                       <Routes>
-                          <Route
-                              path='/deepsight'
-                              element={<DeepSight />}
-                          />
-                          <Route
-                              path='/dailypaper'
-                              element={<DailyPaper />}
-                          />
-                          <Route
-                              path='/dailynews'
-                              element={<DailyNews />}
-                          />
-                          <Route
-                              path='/deepdive'
-                              element={<DeepDive />}
-                          />
+                          <Route path="/" element={<DeepSight />} />
+                          <Route path="/deepsight" element={<DeepSight />} />
+                          <Route path="/dailypaper" element={<DailyPaper />} />
+                          <Route path="/dailynews" element={<DailyNews />} />
+                          <Route path="/dailynews/dashboard" element={<Dashboard />} />
+                          <Route path="/dailynews/dataset" element={<Dataset />} />
+                          <Route path="/dailynews/deepdive" element={<DeepDive />} />
                       </Routes>
                   </Layout>
               </BrowserRouter>

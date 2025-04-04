@@ -8,13 +8,13 @@ interface MainContentProps {
   isSidebarOpen: boolean;
 }
 
-const MainContent = styled(Box)<MainContentProps>(({ isSidebarOpen }) => ({
+const MainContent = styled(Box)<MainContentProps>(({}) => ({
   flexGrow: 1,
-  padding: '24px',
-  marginLeft: isSidebarOpen ? '10px' : '60px',
-  transition: 'margin-left 0.3s ease',
-  backgroundColor: '#FFFFFF',
-  minHeight: '100vh',
+  padding: "24px",
+  marginLeft: "10px", // isSidebarOpen ?
+  transition: "margin-left 0.3s ease",
+  backgroundColor: "#FFFFFF",
+  minHeight: "100vh",
 }));
 
 const ContentContainer = styled(Container)({

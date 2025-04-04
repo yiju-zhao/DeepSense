@@ -7,6 +7,7 @@ import {
   Paper,
   Checkbox,
   Button,
+  Tooltip,
 } from "@mui/material";
 import { styled } from "@mui/material/styles";
 
@@ -116,6 +117,10 @@ const PaperTitle = styled(Typography)({
 const PaperInfo = styled(Typography)({
   color: "#666666",
   fontSize: "14px",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  display: "block"
 });
 
 const IconContainer = styled(Box)<{ isCollapsed: boolean }>(
@@ -198,6 +203,11 @@ const OptionItem = styled(Box)({
   },
 });
 
+const truncateText = (text: string, limit: number) => {
+  if (text.length <= limit) return text;
+  return text.slice(0, limit) + "...";
+};
+
 export const DeepDive: React.FC = () => {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [selectedPapers, setSelectedPapers] = useState<string[]>([]);
@@ -263,7 +273,14 @@ export const DeepDive: React.FC = () => {
     );
   };
 
-  const handleDeselectAll = () => {
+  const handleDeleteSelected = () => {
+    if (selectedPapers.length === 0) return;
+    
+    // Remove selected papers from the papers list
+    setPapers((prevPapers) =>
+      prevPapers.filter((paper) => !selectedPapers.includes(paper.id))
+    );
+    // Clear the selection after deletion
     setSelectedPapers([]);
   };
 
@@ -402,6 +419,11 @@ export const DeepDive: React.FC = () => {
     };
   }, [isDragging]);
 
+  const formatPaperInfo = (paper: Paper) => {
+    const fullText = `${paper.conference} | ${paper.authors.join(", ")} | ${paper.organization}`;
+    return truncateText(fullText, 50); // Adjust this number based on testing
+  };
+
   return (
     <Box display='flex' height='100vh' bgcolor='white' gap={1}>
       {/* Sources Column */}
@@ -417,19 +439,23 @@ export const DeepDive: React.FC = () => {
                 onClick={() => setIsSourcesCollapsed(!isSourcesCollapsed)}
               >
                 <img
-                  src="/assets/img/fold-box.svg"
-                  alt="collapse"
+                  src='/assets/img/fold-box.svg'
+                  alt='collapse'
                   style={{
                     transform: isSourcesCollapsed ? "rotate(180deg)" : "none",
-                    width: "20px",
-                    height: "20px",
+                    width: isSourcesCollapsed ? "70%" : "20px",
+                    height: isSourcesCollapsed ? "70%" : "20px",
+                    maxWidth: "30px",
+                    maxHeight: "30px",
+                    minWidth: "16px",
+                    minHeight: "16px",
                   }}
                 />
               </IconButton>
-              <IconButton onClick={handleDeselectAll}>
+              <IconButton onClick={handleDeleteSelected}>
                 <img
-                  src="/assets/img/delete-icon.svg"
-                  alt="delete"
+                  src='/assets/img/delete-icon.svg'
+                  alt='delete'
                   style={{
                     width: "20px",
                     height: "20px",
@@ -463,17 +489,20 @@ export const DeepDive: React.FC = () => {
                     alignItems='flex-start'
                     justifyContent='space-between'
                   >
-                    <Box flex={1} pr={2}>
+                    <Box flex={1} pr={2} maxWidth="calc(100% - 40px)">
                       <PaperTitle>{paper.title}</PaperTitle>
-                      <PaperInfo>
-                        {paper.conference} | {paper.authors.join(", ")} |{" "}
-                        {paper.organization}
-                      </PaperInfo>
+                      <Tooltip title={`${paper.conference} | ${paper.authors.join(", ")} | ${paper.organization}`}>
+                        <PaperInfo>
+                          {formatPaperInfo(paper)}
+                        </PaperInfo>
+                      </Tooltip>
                     </Box>
-                    <Checkbox
-                      checked={selectedPapers.includes(paper.id)}
-                      onChange={() => handlePaperSelect(paper.id)}
-                    />
+                    <Box>
+                      <Checkbox
+                        checked={selectedPapers.includes(paper.id)}
+                        onChange={() => handlePaperSelect(paper.id)}
+                      />
+                    </Box>
                   </Box>
                 </Box>
               ))}
@@ -531,11 +560,13 @@ export const DeepDive: React.FC = () => {
                       <Box key={paper.id} mb={4}>
                         <Box display='flex' alignItems='center' gap={2} mb={3}>
                           <img
-                            src="/assets/img/bulb.svg"
-                            alt="bulb"
-                            style={{ width: 24, height: 24 }}
+                            src='/assets/img/bulb.svg'
+                            alt='bulb'
+                            style={{ width: 40, height: 40 }}
                           />
-                          <Typography variant='h6'>{paper.title}</Typography>
+                          <Typography variant='h6' sx={{ fontSize: 24 }}>
+                            {paper.title}
+                          </Typography>
                         </Box>
                         <Typography
                           variant='body1'
@@ -551,9 +582,21 @@ export const DeepDive: React.FC = () => {
                     ))}
                 </>
               ) : (
-                <Typography variant='h6' mb={3}>
-                  Select a paper to start chatting
-                </Typography>
+                <>
+                  <Box display='flex' alignItems='center' gap={2} mb={4}>
+                    <img
+                      src='/assets/img/bulb.svg'
+                    alt='bulb'
+                    style={{ width: 40, height: 40 }}
+                  />
+                  <Typography variant='h6' sx={{ fontSize: 24 }}>
+                    DeepDive
+                  </Typography>
+                </Box>
+                  <Typography variant='body1' color='textSecondary'>
+                    Ask me anything about the selected papers
+                  </Typography>
+                </>
               )}
 
               <ChatContainer ref={chatContainerRef}>
@@ -596,8 +639,8 @@ export const DeepDive: React.FC = () => {
                   }}
                 >
                   <img
-                    src="/assets/img/send.svg"
-                    alt="send"
+                    src='/assets/img/send.svg'
+                    alt='send'
                     style={{ width: 24, height: 24 }}
                   />
                 </IconButton>
@@ -629,8 +672,8 @@ export const DeepDive: React.FC = () => {
                 onMouseDown={handleDragStart}
               >
                 <img
-                  src="/assets/img/progress-bar.svg"
-                  alt="progress"
+                  src='/assets/img/progress-bar.svg'
+                  alt='progress'
                   style={{ width: "100%", height: "4px" }}
                 />
                 <ProgressDot
@@ -639,8 +682,8 @@ export const DeepDive: React.FC = () => {
                   }}
                 >
                   <img
-                    src="/assets/img/progress-dot.svg"
-                    alt="progress dot"
+                    src='/assets/img/progress-dot.svg'
+                    alt='progress dot'
                     style={{ width: "16px", height: "16px" }}
                   />
                 </ProgressDot>
@@ -650,7 +693,7 @@ export const DeepDive: React.FC = () => {
                 <Box display='flex' alignItems='center' gap={2}>
                   <IconButton onClick={handlePlayPause}>
                     <img
-                      src="/assets/img/play.svg"
+                      src='/assets/img/play.svg'
                       alt={isPlaying ? "pause" : "play"}
                       style={{
                         width: "46px",
@@ -666,8 +709,8 @@ export const DeepDive: React.FC = () => {
                 <Box position='relative'>
                   <IconButton onClick={() => setShowOptions(!showOptions)}>
                     <img
-                      src="/assets/img/three-dot-option.svg"
-                      alt="options"
+                      src='/assets/img/three-dot-option.svg'
+                      alt='options'
                       style={{ width: "24px", height: "24px" }}
                     />
                   </IconButton>
@@ -676,24 +719,24 @@ export const DeepDive: React.FC = () => {
                     <OptionsMenu>
                       <OptionItem>
                         <img
-                          src="/assets/img/playspeed.svg"
-                          alt="playspeed"
+                          src='/assets/img/playspeed.svg'
+                          alt='playspeed'
                           style={{ width: "20px", height: "20px" }}
                         />
                         <Typography>Playspeed</Typography>
                       </OptionItem>
                       <OptionItem>
                         <img
-                          src="/assets/img/download.svg"
-                          alt="download"
+                          src='/assets/img/download.svg'
+                          alt='download'
                           style={{ width: "20px", height: "20px" }}
                         />
                         <Typography>Download</Typography>
                       </OptionItem>
                       <OptionItem>
                         <img
-                          src="/assets/img/delete-icon.svg"
-                          alt="delete"
+                          src='/assets/img/delete-icon.svg'
+                          alt='delete'
                           style={{ width: "20px", height: "20px" }}
                         />
                         <Typography>Delete</Typography>
