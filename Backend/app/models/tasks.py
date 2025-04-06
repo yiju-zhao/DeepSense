@@ -69,7 +69,7 @@ class CrawlerTask(SQLModel, table=True):
         return f"<CrawlerTask(id={self.id}, name={self.name}, status={self.status.value})>"
 
 class ArxivPaper(SQLModel, table=True):    
-    id: Optional[int] = Field(default=None, primary_key=True, description="任务ID,主键,自增")
+    id: Optional[int] = Field(default=None, primary_key=True, description="ID,主键,自增")
     arxiv_id: str = Field(
         ..., 
         max_length=255, unique=True, index=True, 
@@ -92,7 +92,12 @@ class ArxivPaper(SQLModel, table=True):
         return f"<ArxivPaper(arxiv_id='{self.arxiv_id}', title='{self.title}')>"
 
 class Publication(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True, description="论文的唯一标识符，主键")
+    id: Optional[int] = Field(default=None, primary_key=True, description="ID,主键,自增")
+    paper_id: str = Field(
+        ..., 
+        max_length=255, unique=True, index=True, 
+        description="唯一的论文ID"
+    )
     instance_id: Optional[int] = Field(default=None, description="实例的唯一标识符，外键关联期刊或者会议")
     title: str = Field(..., max_length=500, description="论文标题")
     year: Optional[int] = Field(default=None, description="论文发表的年份")
@@ -124,7 +129,7 @@ class SOTAContext(SQLModel, table=True):
     """
     表示知识库条目的模型。
     """
-    id: Optional[int] = Field(default=None, primary_key=True, description="条目的唯一标识符，主键")
+    id: Optional[int] = Field(default=None, primary_key=True, description="ID,主键,自增")
     keyword: str = Field(..., description="技术主题或研究方向的关键字")
     description: Optional[str] = Field(default=None, description="关键字对应的描述")
     research_context: Optional[str] = Field(default=None, description="关键字对应的最新研究成果")
@@ -140,9 +145,13 @@ class PaperScores(SQLModel, table=True):
     """
     存储论文评分信息的模型。
     """
-    paper_id: Optional[int] = Field(default=None, primary_key=True, description="论文的唯一标识符，主键")
+    id: Optional[int] = Field(default=None, primary_key=True, description="ID,主键,自增")
+    paper_id: str = Field(
+        ..., 
+        max_length=255, unique=True, index=True, 
+        description="唯一的论文ID"
+    )
     title: str = Field(..., description="论文的标题")
-    key_tpoics: Optional[str] = Field(default=None, description="论文的关键词列表,以逗号分隔")
     innovation_score: Optional[float] = Field(default=None, ge=0.0, le=10.0, description="创新性评分，范围为0到10")
     innovation_reason: Optional[str] = Field(default=None, description="创新性评分的理由")
     performance_score: Optional[float] = Field(default=None, ge=0.0, le=10.0,description="性能评分，范围为0到10")
@@ -206,6 +215,12 @@ class CrawlerTaskCreate(BaseModel):
     repeat_type: Optional[str]
     repeat_interval: Optional[int]
     next_run_time: Optional[datetime]
+
+class StandardResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[Any] = None
+    task_id: Optional[str] = None  # Make task_id optional
 
 class TaskExecutionResponse(BaseModel):
     id: int

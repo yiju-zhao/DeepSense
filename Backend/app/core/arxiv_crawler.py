@@ -20,6 +20,7 @@ with it, but please play nice with the arXiv API!
 """
 
 import random
+import sys
 import time
 import logging
 import os
@@ -29,14 +30,16 @@ import requests
 from .base_crawler import ApiArgs, BaseCrawler
 import xml.etree.ElementTree as ET
 
-# Configure the logging format to include the timestamp
+# Configure logging
 logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO,  # Set the logging level as needed
-    datefmt='%Y-%m-%d %H:%M:%S'  # Customize the timestamp format
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('app.log')
+    ]
 )
-
-# Create a logger instance
+# Create logger for this module
 logger = logging.getLogger(__name__)
 
 class ArxivApiArgs(ApiArgs):

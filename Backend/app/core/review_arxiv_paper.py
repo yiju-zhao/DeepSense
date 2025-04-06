@@ -1,30 +1,58 @@
 
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
+import json
 import logging
 import math
+import os
+from pathlib import Path
 import re
+from string import Template
+import sys
 import time
 from typing import Dict, List
 
-from fastapi import Path
 import fitz
-from openai import OpenAI
+from openai import OpenAI, Timeout
 import requests
-from app.database import SessionLocal
+from config import get_data_storage_dir
+from database import SessionLocal
 from models.tasks import ArxivPaper, PaperScores, Publication, SOTAContext
+from sqlalchemy.exc import SQLAlchemyError
 
-# Configure the logging format to include the timestamp
+# Configure logging
 logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO,  # Set the logging level as needed
-    datefmt='%Y-%m-%d %H:%M:%S'  # Customize the timestamp format
+    level=logging.INFO,
+    format='%(asctime)s - %(funcName)s[%(lineno)d] - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('app.log')
+    ]
 )
-
-# Create a logger instance
+# Create logger for this module
 logger = logging.getLogger(__name__)
+
+class InMemoryCacheDevOnly:
+    def __init__(self):
+        self.cache = {}
+
+    def get(self, prompt: str):
+        """
+        Retrieve the cached response for the given prompt.
+        Returns the JSON response if found, or None if not cached.
+        """
+        return self.cache.get(prompt)
+
+    def set(self, prompt: str, response: dict):
+        """
+        Cache the JSON response for the given prompt.
+        """
+        self.cache[prompt] = response
+
+cache = InMemoryCacheDevOnly()
 
 class BaseAssistant:
     def __init__(self, config: dict):
@@ -34,7 +62,7 @@ class BaseAssistant:
         self.instruction = config.get('instruction')
         self.client = OpenAI()  # 在初始化时创建一个共享的客户端实例
         
-    def _get_db():
+    def _get_db(self):
         db = SessionLocal()
         try:
             yield db
@@ -49,52 +77,92 @@ class BaseAssistant:
         return self._get_response(publication=publication, prompt=prompt)
     
     def _get_response(self, publication: Publication,prompt:str) -> dict:
-        try:
-            # 调用 OpenAI 接口
-            response = self.client.responses.create(
-                model=self.model_name,
-                instructions=self.instruction,
-                input=prompt,
-                max_output_tokens=10000   #TODO: 这里可以根据实际需要调整,开发阶段，限制长度
-            )
-            # 解析并返回结果
-            return self._parse_response(response)
-        except Exception as e:
-            logger.error(f"Error in OpenAI API call: {e}")
-            raise e
+        max_retries = 2  # 允许重试2次
+        cached_response = cache.get(prompt)
+        if cached_response:
+            logger.info(f'!!biggo!!Cached response return: {cached_response}')
+            return cached_response
+        
+        for attempt in range(max_retries + 1):
+            try:
+                # 调用 OpenAI 接口
+                response = self.client.responses.create(
+                    model=self.model_name,
+                    instructions=self.instruction,
+                    input=prompt,
+                    max_output_tokens=10000   #TODO: 这里可以根据实际需要调整,开发阶段，限制长度
+                )
+                # 解析并返回结果
+                result = self._parse_response(response)
+                # TODO: 优化它
+                cache.set(prompt=prompt, response=result)
+                return result
+            except ValueError as ve:
+                logger.error(f'Recived an invalid response from LLM API call\n Response:{response} \n and the errors are:\n {ve}')
+                logger.info(f"Retrying {attempt + 1}...")
+            except Exception as e:
+                logger.error(f'Recived an invalid response from LLM API call\n Response:{response} \n and the errors are:\n {ve}')
+        # failed retry:
+        logger.error(f"Attempt {attempt + 1} failed. Exit with error!!!")
+        return None 
     
     def _load_domain_sota_knowledge(self, publication:Publication) -> str:
-        if publication.keywords:
+        if publication.research_topics:
+            keywords = publication.research_topics
+        elif publication.keywords:
             keywords = publication.keywords
-        elif publication.title:
+        else:
             keywords = "I dont have keywords, but I have the title: " + publication.title
         # 让AI来总结文章的研究方向/关键技术，这个不总是等于关键字, 应该要比关键字更加具体。 比如“kv cache的压缩”
-        key_topics = self.ai_assisstant(publication=publication, context=keywords, prompt=self.prompt)
+        # set default value:
+        sota_result = f'Remember, you are the best expector in this domain. \
+                I can not provide enough backgroud knowledge context to you, \
+                please try your best based on your memory.\n'
         if keywords:
-            db = next(self.get_db())
-            knowledge = """Remember, you are the best expector in this domain,and here is some short summery of the backgroud knowledge which can help do the deep anaylsis:"""
+            db = next(self._get_db())
             sota_context_list =[]
             # 根据top 3 的关键字（节约上下文），先从数据库中获取相关的知识
             for keyword in keywords.split(',')[:3]:
                 sota_context = db.query(SOTAContext).filter(SOTAContext.keyword == keyword).first()
-                if sota_context:
+                if sota_context and sota_context.research_context:
                     sota_context_list.append(sota_context.research_context)
             if sota_context_list:
-                sota_str = '\n\n'.join(sota_context_list)
-                return f'Remember, you are the Best Expert \
+                sota_str = '\n'.join(sota_context_list)
+                sota_result = f'Remember, you are the Best Expert \
             in this domain, and here is some short summery of \
-            the backgroud knowledge which can help do the deep anaylsis:{sota_str}'
-        else:
-            return 'Remember, you are the best expector in this domain. \
-                I can not provide enough backgroud knowledge context to you, \
-                please try your best based on your memory.\n'
+            the backgroud knowledge,they are state-of-the-art knowledges, \
+                which can help do the deep anaylsis:{sota_str}'
+                
+        logger.info(f"Load domain SOTA knowledge: {sota_result}")
+        return sota_result
     
     def _parse_response(self, response) -> dict:
-        # 解析 OpenAI 的响应并提取评分结果
-        # TODO: 实际上还可以考虑增强一些逻辑，处理异常情况，提高容错能力。比如ai 的分数是不是在 0-10 之间？
+        # 解析 OpenAI 的响应并提取评分结果, 默认返回结果都是json 格式，除去```json
         if not response or not hasattr(response, 'output_text'):
             raise ValueError("Invalid response from OpenAI API.")
-        return response.output_text
+        # convert it to json date type
+        try:
+            # Remove optional 'json' identifier after the opening triple backticks
+            response_text = response.output_text
+            cleaned_result = re.sub(r'^```json\s*', '', response_text)
+            # Remove closing triple backticks
+            cleaned_result = re.sub(r'```$', '', cleaned_result)
+            # TODO: 实际上还可以考虑增强一些逻辑，处理异常情况，提高容错能力。比如ai 的分数是不是在 0-10 之间？
+            
+            json_result = json.loads(cleaned_result)
+        except Exception as e:
+            raise ValueError(f'AI response is not a valid json date. Error: {e}')
+        
+        return json_result
+    
+    def _handle_retry(self, attempt: int):
+        """
+        处理重试逻辑，例如记录日志或等待一段时间。
+        """
+        wait_time = 2 ** attempt  # 指数退避策略：2, 4 秒
+        print(f"Attempt {attempt + 1} failed. Retrying after {wait_time} seconds...")
+        time.sleep(wait_time)
+
 
 class TopicSummaryAssistant(BaseAssistant):
     def __init__(self, config: dict):
@@ -105,8 +173,9 @@ class TopicSummaryAssistant(BaseAssistant):
         self.instruction = config.get('instruction')
     
     def do_work(self, publication, context):
-        if publication.research_topics:
+        if publication.research_topics and publication.keywords:
             # 如果论文已经包含研究课题,then 直接使用
+            logger.info(f'found existing keywords:{publication.keywords} and key research topic: {publication.research_topics}')
             return {"keywords": publication.keywords, 
                     "research_topics": publication.research_topics}
             
@@ -116,12 +185,14 @@ class TopicSummaryAssistant(BaseAssistant):
             keywords = "I dont have keywords, but I have the title: " + publication.title
         else:
             keywords = "I dont have keywords, and I dont have title. Please try your best."
+        logger.info(f'preparing prompt with keywords:{keywords}')
         prompt = self.prompt.format(
             title=publication.title,
-            keyword_list=keywords,
+            keywords=keywords,
             abstract=publication.abstract,
             conclusion=publication.conclusion)
-            
+        
+        logger.info(f"Prompt for Topic Summary Assistant: {prompt[:200]}")
         return self._get_response(publication=publication, prompt=prompt)
       
 class TraigeAssistant(BaseAssistant):
@@ -153,6 +224,7 @@ class TraigeAssistant(BaseAssistant):
             full_text=publication.content_raw_text[:10000], # TODO测试阶段，限制长度
             sota_context=sota_context
             )
+        logger.info(f"Prompt for Triage Assistant: {prompt[:200]}")
         return self._get_response(publication=publication, prompt=prompt)
     
 class DomainExpertReviewAssistant(BaseAssistant):
@@ -163,31 +235,29 @@ class DomainExpertReviewAssistant(BaseAssistant):
         self.prompt = config.get('prompt')
         self.instruction = config.get('instruction')
     
-    def do_work(self, publication, context):
+    def do_work(self, publication, traige_summary, previous_review_json) ->dict:
         # update the instruction, TODO： 感觉应该有更好的地方来处理这个逻辑
         if self.name == AIAssistantType.REVIEWER_GENERAL:
             self.instruction = self.instruction.format(domain=publication.research_topics)
         else:
-            # 如果是domain的专家，请专家自己来加载他的专业领域知识, TODO: 带考虑，现在直接pass
+            # 如果是domain的专家，请专家自己来加载他的专业领域知识, TODO: 待补充考虑，现在直接pass
             pass
         # build the prompt
-        """
-            **标题**：{title}
-            **关键字**：{keywords}
-            **摘要**：{abstract}
-            **结论**：{conclusion}
-            **关于本文的关键信息摘要或者问答**：{traige_summary}
-        """
-        if not context:
-            context = "I dont have enough context, please try your best."
-            
+        if not traige_summary:
+            traige_summary = "I dont have enough context, please try your best."
+        if not previous_review_json:
+            previous_review_json = 'So far, you are the first expert to review and score this paper. please try your best to give a review and put an score to each domain.'
+        
         prompt = self.prompt.format(
             title=publication.title,
             keywords=publication.research_topics,
             abstract=publication.abstract,
             conclusion=publication.conclusion,
-            traige_summary=context
+            traige_summary=traige_summary,
+            previous_review_json = previous_review_json
         )
+        
+        logger.info(f"Prompt for Domain Expert [{self.name}] Review Assistant: {prompt[:200]}")
         return self._get_response(publication=publication, prompt=prompt)
 
 class AIAssistantType(Enum):
@@ -232,184 +302,251 @@ class PaperReviewConfig:
         AIAssistantType.TOPIC_SUMMARY: {
             "name": "topic_summary",
             "model_name": "gpt-4o-mini",
-            'instruction': '作为一名专业的学术论文分析专家，你的任务是阅读并分析提供的论文信息，包括标题、关键字（如有）、摘要和结论。你的目标是从中提取出以下内容：\
-                            1. 关键字：总结论文主题的核心术语。\
-                            2. 研究课题：提炼论文研究的前三大具体课题或方向，这些课题应比关键字更具体和明确。例如，关键字可能是“缓存”，但具体的研究课题可能是“键值缓存的压缩方法”。\
-                            请将上述信息以JSON格式返回。',
-            'prompt': """请阅读以下论文信息:
-                    标题：{title}
-                    关键字：{keyword_list}
-                    摘要：{abstract}
-                    结论：{conclusion}
-                    基于上述信息,请提取并列出该论文研究的Top 3个具体课题或研究方向。
-                    要求： 
-                    1. 请保持技术专业术语，不要求翻译为中文
-                    2. 内容不要太长简明扼要。
-                    根据上述信息,提取并返回以下内容的JSON对象,不要添加额外的任何注释,要保证Json格式正确:
-                    {
-                        "keywords": ["关键词1", "关键词2", "关键词3", ...],
-                        "research_topics": ["研究课题1", "研究课题2", "研究课题3"]
-                    }""",
+            'instruction': """You are a professional academic paper analysis expert with extensive experience in evaluating research papers. Your task is to read and analyze the provided core information of a research paper—including its title, keywords (if available), abstract, and conclusion. Based on this information, please extract the following:
+                            1. **Core Keywords:** Summarize the key technical terms that encapsulate the main themes of the paper.
+                            2. **Research Topics:** Identify the top 3 specific research topics or directions that the paper addresses. These topics should be more detailed and specific than the keywords. For example, if a keyword is "cache," a more specific research topic might be "compression methods for key-value caches."
+                            Return your answer strictly in JSON format, with no extra text or annotations.""",
+            'prompt': """Please evaluate the following research paper information and extract the required details:
+                    Paper Information:
+                    Title: {title}
+                    Keywords: {keywords}
+                    Abstract: {abstract}
+                    Conclusion: {conclusion}
+                    Based on the above information, please extract:
+                    1. Core Keywords (i.e., the key technical terms that summarize the paper's main themes).
+                    2. The Top 3 specific research topics or directions that the paper addresses.
+
+                    Requirements:
+                    - Use technical terminology without translating into another language.
+                    - Keep the content concise.
+                    - Return your answer strictly in the following JSON format, ensuring it is syntactically correct and contains no additional text or annotations:
+                    {{
+                        "keywords": ["keyword1", "keyword2", "keyword3", ...],
+                        "research_topics": ["research_topic1", "research_topic2", "research_topic3"]
+                    }}""",
             
         },
         AIAssistantType.PAPER_TRIAGE: {
             'name': "paper_triage",
             'model_name': "gpt-4o-mini",
-            'instruction': """你是一位资深的学术论文审稿专家，熟悉学术界和工业界的前沿研究动态。我将为你提供一篇论文的核心信息，包括标题、关键字、摘要、结论和作者信息等。
-                        请你基于这些内容，系统性地分析并回答以下六个问题：
-                        1. 该论文试图解决的核心问题是什么？
-                        2. 该论文的主要技术贡献是什么？
-                        3. 论文提出的方案或建议中，有哪些创新点值得关注？
-                        4. 该论文是否与当前领域内的 SOTA（state-of-the-art）研究成果进行了对比？如果有，对比结论是什么？
-                        5. 该论文的作者及其所属机构分别是谁？请尽量完整列出。
-                        6. 请评估作者和所属机构在学术界或工业界的影响力，例如：是否为知名大学、实验室或工业研究机构，是否有广泛引用或业界应用。
-                        请确保回答准确、专业，且符合论文内容。
-                            """,
-            'prompt': """请根据以下论文信息，完整、准确地回答对应的问题，并使用符合规范的 JSON 格式返回结果：
-                        论文标题：{title}
-                        关键字：{keywords}
-                        摘要：{abstract}
-                        结论：{conclusion}
-                        文章全文：{full_text}
-                        为了帮助你更好地回答问题，以下是一些该领域的前沿研究成果（SOTA）：
-                        {sota_context}
-                        
-                        要求：
-                        - 用 JSON 格式严格返回答案，不要添加多余的文字或注释。
-                        - 请将每个问题的答案替换到以下 JSON 模板中的相应位置：
-                        - 保证 JSON 可被机器正确解析，确保语法无误。
+            'instruction': """You are a seasoned academic paper reviewer, well-versed in the cutting-edge research trends in both academia and industry. I will provide you with the core information of a research paper—including its title, keywords, abstract, conclusion, and author details.
 
-                        返回格式示例：
-                        {
-                        "core_problem": "请填写该论文试图解决的核心问题。",
-                        "technical_contributions": "请填写该论文的主要技术贡献。",
-                        "innovations_and_proposals": [
-                            "请列举该论文提出的创新点或建议1",
-                            "请列举该论文提出的创新点或建议2"
-                        ],
-                        "sota_comparison": "请填写论文是否与SOTA进行了对比，以及对比的结论。",
-                        "authors_and_affiliations": {
-                            "authors": ["作者1", "作者2"],
-                            "institutions": ["机构1", "机构2"]
-                        },
-                        "influence_assessment": "请评估作者和机构的学术或产业影响力。"
-                        }""",
+                    Based on this information, please analyze and answer the following six questions systematically:
+                    For each of the following questions, your answer must be extremely detailed—approximately 300 words or more for each question if necessary—to ensure that your response contains the most critical and valuable information:
+                    1. What is the core problem that the paper aims to solve?
+                    2. What are the main technical contributions of the paper?
+                    3. What innovative aspects or proposals does the paper present that are noteworthy?
+                    4. Does the paper compare its approach with current state-of-the-art (SOTA) research in the field? If yes, what conclusions does it draw from this comparison?
+                    5. Who are the authors of the paper, and what are their affiliated institutions? Please list them as completely as possible.
+                    6. How would you assess the influence of the authors and their institutions in academia or industry? Consider whether they are associated with renowned universities, laboratories, or industrial research centers, and whether their work is widely cited or applied.
+
+                    Please ensure your answers are accurate, professional, and strictly based on the provided paper content and background context.
+                    After answering the questions, return your final evaluation in strict JSON format without any extra text or markdown formatting. The JSON must follow the exact structure shown below:
+                    {{
+                    "core_problem": "Provide a detailed explanation of the core problem addressed by the paper.",
+                    "technical_contributions": "Provide a detailed explanation of the paper's main technical contributions.",
+                    "innovations_and_proposals": [
+                        "List and detail the first innovative aspect or proposal.",
+                        "List and detail the second innovative aspect or proposal."
+                    ],
+                    "sota_comparison": "Describe whether and how the paper compares its approach with current SOTA research and state the comparison conclusions.",
+                    "authors_and_affiliations": {{
+                        "authors": ["Author1", "Author2"],
+                        "institutions": ["Institution1", "Institution2"]
+                    }},
+                    "influence_assessment": "Provide a detailed assessment of the academic or industrial influence of the authors and their institutions."
+                    }}""",
+            'prompt': """Please evaluate the following research paper based on the instruction above. Use the paper’s core information to answer each of the six questions in detail, ensuring that your response is comprehensive and precise.
+
+                        Paper Information:
+                        Title: {title}
+                        Keywords: {keywords}
+                        Abstract: {abstract}
+                        Conclusion: {conclusion}
+                        Full Text: {full_text}
+                        
+                        For additional context, here are some state-of-the-art (SOTA) research outcomes in this field:
+                        {sota_context}
+
+                        Requirements:
+                        - Return your response strictly in the JSON format as specified in the instruction.
+                        - Do not include any extra text or markdown formatting.
+                        - Ensure that the JSON is syntactically correct and can be parsed by a machine.
+                        """,
         },
         AIAssistantType.REVIEWER_GENERAL: {
             'name': "reviewer_general",
             'model_name': "gpt-4o-mini",
-            'instruction': """作为一名在{domain}的资深专家，您将收到一篇论文的核心信息。请根据以下五个维度对该论文进行评分，评分范围为1.0到10.0，其中10.0分代表最佳表现(分数可以有小数点后2两位)。请严格依据提供的论文内容和背景信息，确保评估的公平性和公正性。
-                        1. **技术创新性（Technical Innovation）**：评估该方法相对于已有方案的新颖程度。例如，判断论文是否引入了前所未有的新机制，或将传统必要组件替换为全新架构。若该工作开辟了新方向，引发社区关注新的研究范式，则应给予高分（8分以上）。
-                        2. **性能提升幅度（Performance Improvement）**：检查其在公认基准数据集上的实验结果，并与之前发表的最佳结果进行比较。若主要指标有显著提升，可判定为高分。需关注提升是否在多个任务或数据集上复现，体现方法的普适性和强大性能增益。
-                        3. **理论或工程简洁性（Theoretical/Engineering Simplicity & Efficiency）**：评估方法是否降低了计算复杂度或工程难度。例如，算法的时间复杂度是否减少，模型参数或内存占用是否降低，训练所需算力或时间是否缩短。若在保持或提高性能的同时，简化了模型结构或提高了训练推理效率，应给予高分。
-                        4. **可复用性与影响力（Reusability & Impact）**：考察该工作的通用性和影响力。若论文提供了易于迁移到其他任务的模型结构或算法，并被广泛采用，说明其可复用性和影响力高。反之，若方法过于定制或复杂，鲜有他人采用，则此维度得分较低。
-                        5. **作者与机构权威度（Author & Institutional Authority）**：查阅作者背景和机构信息，了解其以往研究成果。若作者来自顶级研究单位或曾发表过有影响力的相关工作，且机构拥有强大的研究传统，则权威度评分应相应提高。
-                        在完成上述评分后，请给出是否推荐阅读该论文的建议（"yes"或"no"），并说明理由。若论文主要是信息汇总，且未提供额外价值信息，可给予低分，并明确表示不推荐。
-                        最后，请评估你对该论文的信心程度，范围为0.0到1.0，0.0表示完全不确定，1.0表示非常确定。请根据你对论文内容的理解和分析，给出一个合理的信心值。
-                        请将最终结果以以下JSON格式输出，确保格式严格正确，不要添加额外信息：
-                        {
-                            "score": [
-                                {
-                                "innovation": 7,
-                                "reason": "The paper systematically reviews and categorizes ….."
-                                },
-                                {
-                                "performance": 5,
-                                "reason": "As a survey paper, it does not present new experimental results ….."
-                                },
-                                {
-                                "simplicity": 6,
-                                "reason": "The paper discusses the computational characteristics and potential ….."
-                                },
-                                {
-                                "reusability": 8,
-                                "reason": "By categorizing ….."
-                                },
-                                {
-                                "authority": 7,
-                                "reason": " a reputable institution known for its contributions to …."
-                                }
-                            ],
+            'instruction': """You are a seasoned expert in {domain}. You will receive the core information of a research paper, including the title, keywords (if available), abstract, and conclusion. Based on this information and the provided background context, you are required to evaluate the paper on the following five dimensions. All scores should be on a scale from 1.0 to 10.0 (scores may include up to two decimal places), where 10.0 represents the best performance. Please strictly adhere to the provided paper content and context to ensure a fair and unbiased evaluation.
+                        For each of the five dimensions, please provide a detailed answer of approximately 300 words or more, explaining your reasoning thoroughly.
+                        1. **Technical Innovation:** Evaluate the novelty of the method compared to existing solutions. For instance, determine whether the paper introduces a completely new mechanism or replaces traditional components with an entirely new architecture. If the work opens up a new direction or shifts community focus to a new research paradigm, a high score (above 8.0) is warranted.
+                        2. **Performance Improvement:** Examine the experimental results on recognized benchmark datasets and compare them with the best previously published results. A significant improvement in key metrics should result in a high score. Consider whether the improvements are consistent across multiple tasks or datasets, demonstrating both general applicability and strong performance gains.
+                        3. **Theoretical/Engineering Simplicity & Efficiency:** Assess whether the method reduces computational complexity or engineering difficulty. For example, determine if the algorithm decreases time complexity, reduces model parameters or memory usage, or shortens training/inference time. High scores are justified if the work simplifies the model architecture while maintaining or improving performance.
+                        4. **Reusability & Impact:** Consider the general applicability and influence of the work. If the paper provides a model structure or algorithm that is easily transferable to other tasks and is widely adopted, it should receive a high score. Conversely, if the method is overly specialized or complex, leading to limited adoption, a lower score is appropriate.
+                        5. **Author & Institutional Authority:** Review the backgrounds of the authors and their institutions. If the authors are affiliated with top-tier research institutions or have a history of influential work, and if the institution has a strong research tradition, this dimension should receive a higher score.
+                        After evaluating these dimensions, please provide a recommendation on whether the paper should be read ("yes" or "no") along with your reasoning. If the paper primarily aggregates existing information without adding significant new value, you may assign low scores and explicitly state that it is not recommended.
+                        Finally, please assign a confidence level to your overall evaluation on a scale from 0.0 (completely uncertain) to 1.0 (very certain), based on your analysis.
+                        Return your final result in the following JSON format. Do not include any extra information or annotations, and ensure the JSON is strictly valid and provided in plain text (without any Markdown formatting):
+                        {{
+                            "dimensions": {{
+                                "innovation": {{""score": 7.5, "reason": "Detailed explanation of the paper's technical innovation (approximately 150 words or more)."}},
+                                "performance":{{""score": 5.5, "reason": "Detailed explanation of the paper's performance improvement (approximately 150 words or more)."}},
+                                "simplicity": {{""score": 6.1, "reason": "Detailed explanation of the paper's performance improvement (approximately 150 words or more)."}},
+                                "reusability":{{""score": 5.5, "reason": "Detailed explanation of the paper's performance improvement (approximately 150 words or more)."}},
+                                "authority":{{""score": 8.0,"Detailed explanation of the paper's reusability and impact (approximately 150 words or more)."}}
+                                }},
                             "recommend": "yes",
-                            "reason": "The paper offers a comprehensive overview of ….."
-                            "who_should_read": "beginner… "
+                            "reason": "A detailed explanation of why the paper is recommended or not, with sufficient detail."
+                            "who_should_read": "Target audience description. "
                             "confidence": 0.85
-                        }""",
-            'prompt': """请根据以下论文信息，按照上述指令进行评估：
-                        **标题**：{title}
-                        **关键字**：{keywords}
-                        **摘要**：{abstract}
-                        **结论**：{conclusion}
-                        **关于本文的关键信息摘要或者问答**：{traige_summary}
-                        请严格按照指令中的要求，完成对该论文的评估，并以指定的JSON格式返回结果。""",
+                        }}""",
+            'prompt': """Please evaluate the following research paper based on the instruction provided above. Provide detailed responses for each of the evaluation dimensions, with each explanation being around 300 words or more, so that the answer is thoroughly justified.：
+                        Paper Information:
+                        Title: {title}
+                        Keywords: {keywords}
+                        Abstract: {abstract}
+                        Conclusion: {conclusion}
+                        Additional Summary/QA: {traige_summary}
+                        Based on the above information, perform your evaluation according to the instruction, and return your answer strictly in the JSON format shown in the instruction. Do not include any additional text or Markdown formatting.""",
             
         },
         AIAssistantType.DOMAIN_REVIEWER_ALGORITHM: {
-            'instruction': """你是一位在<计算机软件和算法研究领域>的资深专家，拥有广泛的研究和审稿经验。你收到了一篇论文的核心信息，以及通用 AI Reviewer 给出的初步评分结果，供你参考。
-                            请按照以下步骤进行：
-                            1. **相关性判断**：首先判断该论文是否与你的专业领域 <计算机软件和算法研究领域> 有密切关联。
-                            - 如果判断为“无关”，请不要修改已有评分，直接返回原始评分结果，并补充上你的 confidence 值（例如 0.4），说明该论文与您的领域无关。
-                            2. **评分复核与修正**：
-                            - 如果该论文与你的领域密切相关，请仔细审阅通用 reviewer 的评分，基于你的专业理解，进行合理的校对或小幅修改。
-                            - 避免大幅调整，除非你有充分的专业理由。若有修改，请简要说明原因。
-                            - 评分维度包括：
-                                - 创新性（innovation）
-                                - 性能提升（performance）
-                                - 简洁性与效率（simplicity）
-                                - 可复用性与影响力（reusability）
-                                - 作者与机构权威度（authority）
+            'name': "domain_reviewer_algorithm",
+            'model_name': "gpt-4o-mini",
+            'instruction': """You are a seasoned expert in the field of Computer Software and Algorithm Research, with extensive experience in reviewing academic papers. You have received the core information of a research paper along with preliminary scores provided by a general AI Reviewer for your reference.
 
-                            3. **推荐与信心度**：
-                            - 保留或修改推荐意见（recommend），以及目标读者建议（who_should_read）。
-                            - 最后，请给出你对整体评估的信心度（confidence），范围是 0 到 1，例如 0.85 表示较高信心。
+                        Please follow these steps:
 
-                            ⚠️ 注意：
-                            - 严格按照要求的 JSON 格式输出结果，确保格式正确且可被机器读取。
-                            - 除 JSON 以外，不要添加多余的说明文字或注释。""",
-            'prompt': """请基于以下论文信息和已有的通用 reviewer 的评分，完成你的评审任务。
-                        【论文信息】
-                        标题：{title}
-                        关键字：{keywords}
-                        摘要：{abstract}
-                        结论：{conclusion}
-                        关于本文的关键信息摘要或者问答：{traige_summary}
-                        【已有评分参考】
-                        {previous_review_json}
-                        请按照指令，判断领域相关性，并复核或确认评分。请严格按照以下格式返回结果：
-                        {
-                            "score": [
-                                {
-                                "innovation": 7,
-                                "reason": "The paper systematically reviews and categorizes ….."
-                                },
-                                {
-                                "performance": 5,
-                                "reason": "As a survey paper, it does not present new experimental results ….."
-                                },
-                                {
-                                "simplicity": 6,
-                                "reason": "The paper discusses the computational characteristics and potential ….."
-                                },
-                                {
-                                "reusability": 8,
-                                "reason": "By categorizing ….."
-                                },
-                                {
-                                "authority": 7,
-                                "reason": " a reputable institution known for its contributions to …."
-                                }
-                            ],
+                        1. **Relevance Check:**  
+                        - First, determine whether the paper is closely related to your domain (Computer Software and Algorithm Research).  
+                        - If the paper is not relevant, do not modify the existing scores. Instead, return the original scores and add a confidence value (e.g., 0.4) indicating that the paper is not within your field.
+
+                        2. **Score Review and Adjustment:**  
+                        - If the paper is within your domain, carefully review the preliminary scores provided by the general reviewer.  
+                        - Based on your professional judgment, perform a verification or slight adjustment of the scores.  
+                        - Avoid making major changes unless you have strong professional justification. If you do modify any score, briefly explain the reason.  
+                        - The evaluation dimensions include:  
+                            - Innovation  
+                            - Performance Improvement  
+                            - Simplicity & Efficiency  
+                            - Reusability & Impact  
+                            - Authority (Authors and Institutions)
+                        - For each of the five dimensions, please provide a detailed answer of approximately 300 words or more, explaining your reasoning thoroughly.
+
+                        3. **Recommendation and Confidence:**  
+                        - Confirm or update the recommendation (recommend) and the target readership (who_should_read).  
+                        - Finally, provide a confidence level (ranging from 0.0 to 1.0, where 1.0 indicates very high confidence) in your overall evaluation.
+
+                        ⚠️ **Important:**  
+                        - Return your final result strictly in JSON format as specified below. Do not include any additional text or commentary beyond the JSON output.
+                        - Ensure that the JSON is syntactically correct and machine-parsable.
+
+                        The expected JSON format is as follows:
+                        {{
+                            "dimensions": {{
+                                "innovation": {{""score": 7.5, "reason": "Detailed explanation of the paper's technical innovation (approximately 150 words or more)."}},
+                                "performance":{{""score": 5.5, "reason": "Detailed explanation of the paper's performance improvement (approximately 150 words or more)."}},
+                                "simplicity": {{""score": 6.1, "reason": "Detailed explanation of the paper's performance improvement (approximately 150 words or more)."}},
+                                "reusability":{{""score": 5.5, "reason": "Detailed explanation of the paper's performance improvement (approximately 150 words or more)."}},
+                                "authority":{{""score": 8.0,"Detailed explanation of the paper's reusability and impact (approximately 150 words or more)."}}
+                                }},
                             "recommend": "yes",
-                            "reason": "The paper offers a comprehensive overview of ….."
-                            "who_should_read": "beginner… "
+                            "reason": "A detailed explanation of why the paper is recommended or not, with sufficient detail."
+                            "who_should_read": "Target audience description. "
                             "confidence": 0.85
-                        }""",
-            
+                        }}""",
+            'prompt': """Please evaluate the following research paper based on the instruction provided above. You have been given the paper's core information along with the preliminary scores from the general AI Reviewer.
+
+                        Paper Information:
+                        Title: {title}
+                        Keywords: {keywords}
+                        Abstract: {abstract}
+                        Conclusion: {conclusion}
+                        Additional Summary/QA: {traige_summary}
+
+                        Preliminary Scores (for reference):
+                        {previous_review_json}
+                        
+                        Instructions:
+                        - First, determine if the paper is relevant to your domain (Computer Software and Algorithm Research).  
+                        - If it is not relevant, simply return the preliminary scores, appending a confidence value (for example, 0.4) to indicate that the paper is outside your domain.
+                        - If the paper is relevant, carefully review the preliminary scores and adjust them slightly only if necessary. Avoid large changes unless absolutely required, and provide brief reasons for any modifications.
+                        - Also, confirm or update the recommendation and the intended readership.
+                        - Finally, assign an overall confidence level (from 0.0 to 1.0) to your evaluation.
+
+                        Return your response strictly in the following JSON format (do not include any additional text or Markdown formatting)""", 
+        },
+        AIAssistantType.DOMAIN_REVIEWER_ARCHITECT: {
+            'name': "domain_reviewer_architect",
+            'model_name': "gpt-4o-mini",
+            'instruction': """You are a seasoned expert in the field of Computer Architecture, with extensive experience in reviewing academic papers and assessing state-of-the-art research in hardware design, microarchitecture, and system performance. You have received the core information of a research paper along with preliminary scores provided by a general AI Reviewer for your reference.
+
+                        Please follow these steps:
+
+                        1. **Relevance Check:**  
+                        - First, determine whether the paper is closely related to your domain (Computer Architecture).  
+                        - If the paper is not relevant, do not modify the existing scores. Instead, return the original scores and append a confidence value (e.g., 0.4) indicating that the paper is outside your field.
+
+                        2. **Score Review and Adjustment:**  
+                        - If the paper is relevant, carefully review the preliminary scores provided by the general reviewer.  
+                        - Based on your professional judgment in the context of computer architecture, verify or slightly adjust the scores.  
+                        - Avoid making major changes unless you have strong professional justification. If you modify any score, provide a brief explanation of your reasoning.  
+                        - The evaluation dimensions include:  
+                            - **Innovation:** Evaluate the novelty of the architectural design or hardware innovation (e.g., new microarchitecture, novel hardware acceleration, energy efficiency improvements).  
+                            - **Performance Improvement:** Assess the improvements in performance metrics such as throughput, latency, or power efficiency compared to existing solutions.  
+                            - **Simplicity & Efficiency:** Consider whether the proposed architecture simplifies design complexity, reduces resource usage, or improves system efficiency.  
+                            - **Reusability & Impact:** Evaluate how adaptable the architecture is to different workloads or systems and its potential impact on the research community and industry.  
+                            - **Authority (Authors and Institutions):** Consider the reputation and track record of the authors and their institutions.
+
+                        - For each of the five dimensions, please provide a detailed explanation (approximately 300 words or more if necessary) to thoroughly justify your reasoning.
+
+                        3. **Recommendation and Confidence:**  
+                        - Confirm or update the recommendation (recommend) and the intended readership (who_should_read).  
+                        - Finally, assign an overall confidence level (ranging from 0.0 to 1.0, where 1.0 indicates very high confidence) in your evaluation.
+
+                        ⚠️ **Important:**  
+                        - Return your final result strictly in JSON format as specified below. Do not include any additional text or commentary beyond the JSON output.  
+                        - Ensure that the JSON is syntactically correct and machine-parsable.
+
+                        The expected JSON format is as follows:
+                        {{
+                            "dimensions": {{
+                                "innovation": {{""score": 7.5, "reason": "Detailed explanation of the paper's technical innovation (approximately 150 words or more)."}},
+                                "performance":{{""score": 5.5, "reason": "Detailed explanation of the paper's performance improvement (approximately 150 words or more)."}},
+                                "simplicity": {{""score": 6.1, "reason": "Detailed explanation of the paper's performance improvement (approximately 150 words or more)."}},
+                                "reusability":{{""score": 5.5, "reason": "Detailed explanation of the paper's performance improvement (approximately 150 words or more)."}},
+                                "authority":{{""score": 8.0,"Detailed explanation of the paper's reusability and impact (approximately 150 words or more)."}}
+                                }},
+                            "recommend": "yes",
+                            "reason": "A detailed explanation of why the paper is recommended or not, with sufficient detail."
+                            "who_should_read": "Target audience description. "
+                            "confidence": 0.85
+                        }}""",
+            'prompt': """Please evaluate the following research paper based on the instruction provided above. You have been given the paper's core information along with the preliminary scores from the general AI Reviewer.
+
+                        Paper Information:
+                        Title: {title}
+                        Keywords: {keywords}
+                        Abstract: {abstract}
+                        Conclusion: {conclusion}
+                        Additional Summary/QA: {traige_summary}
+
+                        Preliminary Scores (for reference):
+                        {previous_review_json}
+                        
+                        Instructions:
+                        - First, determine if the paper is relevant to your domain (Computer Software and Algorithm Research).  
+                        - If it is not relevant, simply return the preliminary scores, appending a confidence value (for example, 0.4) to indicate that the paper is outside your domain.
+                        - If the paper is relevant, carefully review the preliminary scores and adjust them slightly only if necessary. Avoid large changes unless absolutely required, and provide brief reasons for any modifications.
+                        - Also, confirm or update the recommendation and the intended readership.
+                        - Finally, assign an overall confidence level (from 0.0 to 1.0) to your evaluation.
+
+                        Return your response strictly in the following JSON format (do not include any additional text or Markdown formatting)""", 
         },
         # TODO: 其他领域的评审助手配置
     }
 
-class ReviewArxivPaper:
+class ReviewArxivPaper():
     '''
     1. 初始化 OpenAI 客户端，会多次发送请求
     2. 对单一论文，首先检查论文 PDF 是否被下载，如果没有，就开启下载
@@ -422,76 +559,112 @@ class ReviewArxivPaper:
         初始化 OpenAI 客户端
         '''
         self.client = OpenAI()
-
-    def _get_db():
+        
+    def _get_db(self):
         db = SessionLocal()
         try:
             yield db
         finally:
             db.close()
             
-    def process(self, paper: 'ArxivPaper'):
+    def process(self, paper: 'ArxivPaper') -> PaperScores:
         '''
         处理单篇论文
         '''
-        if not self._is_pdf_downloaded(paper):
-            pdf_path = self._download_pdf(paper)
-        # 1. 简单处理，去掉空行
-        text = self._parse_pdf_to_text(pdf_path)
-        text_lines = [line.strip() for line in text.split("\n") if line.strip()]
-        # 2. 论文的一些典型识别标题
-        title_indices = self._detect_section_titles(text_lines)
-        # 3. 按标题拆分
-        section_chunks = self._split_to_chunks_by_title(text_lines, title_indices)
-        # 4. 选出重点内容
-        abstract_text = section_chunks.get('abstract', '')
-        conclusion_text = section_chunks.get('conclusion', '')
-        references_text = section_chunks.get('references', '')
-        full_text_lines=[]
-        for key in title_indices:
-            print(key)
-            full_text_lines.append('\n'.join(section_chunks.get(key)))
-            if key.strip().lower() == 'conclusion' or key.strip().lower() == 'references':
-                break
-        main_context = '\n'.join(full_text_lines)
-        
-        # 新建一个publication
-        publication = Publication(
-            id = paper.arxiv_id,
-            instance_id=0, # 默认关联到一个非会议
-            title=paper.title,
-            year= datetime.strptime(paper.published, '%Y-%m-%d').strftime('%Y'),
-            publish_date=paper.published,
-            tldr='',
-            abstract=paper.summary if paper.summary else abstract_text,
-            conclusion= conclusion_text,
-            content_raw_text= main_context,
-            reference_raw_text=references_text,
-            pdf_path= pdf_path,
-            citation_count=0,
-            award='',
-            doi='',
-            url='',
-            pdf_url=paper.pdf_url,
-            attachment_url=''
-        )
-        # 先保存到数据库
-        db = next(self.get_db())
-        db.add(publication)
-        db.commit()
-        # 然后交给评审打分
-        db.refresh(publication)
-        scores =self._review_paper_with_ai_experts(publication)
-        db.add(scores)
-        db.commit()
+        logger.info(f"Processing paper: “{paper.title}”")
+        db = None
+        try:
+            
+            # 检查 PDF 是否已经下载
+            full_path, relative_path = self._get_pdf_path(paper)
+            if not self._is_pdf_downloaded(paper):
+                logger.info(f"PDF not downloaded, downloading now: {paper.pdf_url}")
+                full_path, relative_path = self._download_pdf(paper)
+            
+            if not full_path or not relative_path:
+                logger.error(f"Failed to locate the PDF for paper: {paper.title}")
+                return None
+            logger.info(f"Found the paper PDF file in: {relative_path}")
+            
+            # 检查 Publication 是否已经存在 
+            db = next(self._get_db())
+            publication = db.query(Publication).filter(Publication.paper_id == paper.arxiv_id).first()
+            if not publication:
+                logger.info(f"Publication not found in database, creating new entry for: {paper.title}")
+                # 1. 简单处理，去掉空行
+                text = self._parse_pdf_to_text(full_path)
+                text_lines = [line.strip() for line in text.split("\n") if line.strip()]
+                # 2. 论文的一些典型识别标题
+                title_indices = self._detect_section_titles(text_lines)
+                # 3. 按标题拆分
+                section_chunks = self._split_to_chunks_by_title(text_lines, title_indices)
+                # 4. 选出重点内容
+                abstract_text = '\n'.join(section_chunks.get('abstract', '')) # convert to string
+                conclusion_text = '\n'.join(section_chunks.get('conclusion', ''))
+                references_text = '\n'.join(section_chunks.get('references', ''))
+                if title_indices.get('refernces'):
+                    # main context 取到 references 之前的所有内容
+                    main_context = '\n'.join(text_lines[0:section_chunks.get('references')])
+                else:
+                    # 如果没有 references，简单取全文
+                    main_context = text
+                logger.info(f'abstract_text: {abstract_text[:100]}')
+                logger.info(f'conclusion_text: {conclusion_text[:100]}')
+                logger.info(f"Main context extracted from PDF: {main_context[:200]}...")
+                # 新建一个publication
+                publication = Publication(
+                    paper_id=paper.arxiv_id,
+                    instance_id=0, # 默认关联到一个非会议
+                    title=self._clean_db_str_input(paper.title),
+                    year= paper.published.strftime('%Y'),
+                    publish_date=paper.published,
+                    tldr='',
+                    abstract=self._clean_db_str_input(paper.summary if paper.summary else abstract_text),
+                    conclusion= self._clean_db_str_input(conclusion_text),
+                    content_raw_text= self._clean_db_str_input(main_context),
+                    reference_raw_text=self._clean_db_str_input(references_text),
+                    pdf_path= relative_path,  #存储相对路径，方便系统迁移
+                    citation_count=0,
+                    award='',
+                    doi='',
+                    url='',
+                    pdf_url=paper.pdf_url,
+                    attachment_url=''
+                )
+                # 先保存到数据库
+                db.add(publication)
+                logger.info(f"Saving publication to database: {publication.title}")
+                db.commit()
+                db.refresh(publication)
+                   
+            # 然后交给评审打分
+            scores =self._review_paper_with_ai_experts(publication)
+            db.add(publication)
+            db.add(scores)
+            db.commit()
 
-    def process_batch(self, paper_list: List['ArxivPaper']):
+            db.refresh(scores)
+            return scores
+        
+        except SQLAlchemyError as db_err:
+            db.rollback()
+            logger.error(f"Database error occurred while processing paper “{paper.title}”: {db_err}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while processing paper “{paper.title}”: {e}")
+        finally:
+            if db:
+                db.close()
+                
+        return None
+
+    def process_batch(self, paper_list: List['ArxivPaper']) -> List[PaperScores]:
         '''
         批量处理论文
         '''
         # TODO: 一次处理两篇论文，调试完成后删除
         paper_list = paper_list[:2]
-        
+        results = []
+        # 使用线程池并发处理
         max_threads = 4  # 根据您的系统和任务需求调整线程数
         with ThreadPoolExecutor(max_threads) as executor:
             # 提交所有任务
@@ -500,12 +673,14 @@ class ReviewArxivPaper:
             for future in as_completed(future_to_paper):
                 paper = future_to_paper[future]
                 try:
-                    future.result()  # 获取线程执行结果
+                    results.append(future.result()) # 获取线程执行结果
                 except Exception as exc:
-                    logger(f'{paper} 处理时发生异常: {exc}')
+                    logger.error(f'{paper} 处理时发生异常: {exc}')
+        
+        return results
 
-    def _detect_section_titles(lines):
-        """检测标题行，返回标题索引"""
+    def _detect_section_titles(self,lines):
+        """检测标题行，返回标题行索引"""
         title_indices = {}
         section_num = 0 # 对于 summary、limitation 这类标题，可能在多个位置出现，需要全部保留。加一个编码，保证独立
         for i, line in enumerate(lines):
@@ -520,7 +695,7 @@ class ReviewArxivPaper:
                     break
         return title_indices
     
-    def _split_to_chunks_by_title(lines, title_indices):
+    def _split_to_chunks_by_title(self, lines, title_indices):
         """按照标题行分块"""
         chunks = defaultdict(list)
         sorted_sections = sorted(title_indices.items(), key=lambda x: x[1])  # 按出现顺序排序
@@ -531,50 +706,65 @@ class ReviewArxivPaper:
         
         return chunks
     
-    def _get_pdf_path(paper):
+    def _get_pdf_path(self, paper):
         """
         根据论文信息生成对应的 PDF 存储路径。
-        假设 paper.date 是 'YYYY-MM-DD' 格式的字符串，paper.id 是论文的唯一标识符。
+        假设 paper.date 是 'YYYY-MM-DD' 格式的字符串，paper.arxiv_id 是论文的唯一标识符。
         """
-        paper_date = datetime.strptime(paper.published, '%Y-%m-%d')
-        year = paper_date.strftime('%Y')
-        month = paper_date.strftime('%m')
-        
-        # 获取当前文件 core.py 的绝对路径
-        current_file = Path(__file__).resolve()
-
-        # 获取项目根目录 backend/
-        project_root = current_file.parents[2]
-        # 构建 pdf 存储目录
-        pdf_dir = project_root / 'data' / 'pdf' / year / month
-        pdf_path = pdf_dir / f"{paper.id}.pdf"
-        
-        # 如果目录不存在，则创建
-        pdf_dir.mkdir(parents=True, exist_ok=True)
-        
-        return pdf_dir, pdf_path
+        try:
+            # 解析日期字符串
+            year = paper.published.strftime('%Y')
+            month = paper.published.strftime('%m')
+            # 构建相对路径
+            relative_path = f"./pdf/{year}/{month}/{paper.arxiv_id}.pdf"
+            # 从配置文件中获取 PDF 存储目录
+            data_storage_dir = get_data_storage_dir()
+            # 构建完整路径
+            full_path = data_storage_dir / relative_path
+       
+            logger.info(f"search PDF relative path: {relative_path}") 
+            # 如果目录不存在，则创建
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            
+        except Exception as e:
+            logger.error(f"Error generating PDF path: {e}")
+            raise e
+        # 返回 PDF 存储目录和文件路径
+        return str(full_path), str(relative_path)
 
     def _is_pdf_downloaded(self, paper: 'ArxivPaper') -> bool:
         '''
         检查论文的 PDF 是否已下载
         '''
         # 实现检查逻辑
-        pdf_dir, pdf_path = self._get_pdf_path(paper)
-        return pdf_path.is_file()
+        logger.info(f"Checking if PDF is downloaded for paper: {paper.title}")
+        full_path, relative_path = self._get_pdf_path(paper)
+        logger.info(f"Checking if PDF exists at: {relative_path}")
+        return os.path.exists(full_path)
 
-    def _download_pdf(self, paper: 'ArxivPaper') ->str:
+    def _download_pdf(self, paper: 'ArxivPaper'):
         """
         下载论文的 PDF 并保存到指定路径。
         """
-        _, pdf_path = self._get_pdf_path(paper)
-        
-        response = requests.get(paper.pdf_url)
-        if response.status_code == 200:
-            with open(pdf_path, 'wb') as f:
+        full_path, relative_path = self._get_pdf_path(paper)
+        try:
+            response = requests.get(paper.pdf_url, timeout=10)  # 设置超时时间为10秒
+            response.raise_for_status()  # 如果响应状态码不是 200，将引发 HTTPError 异常
+            with open(full_path, 'wb') as f:
                 f.write(response.content)
-        else:
-            raise Exception(f"无法下载 PDF,HTTP 状态码：{response.status_code}")
-        return pdf_path
+            logging.info(f"PDF downloaded and saved to {relative_path}")
+            return full_path, relative_path
+        except requests.HTTPError as http_err:
+            logging.error(f"HTTP error occurred while downloading PDF: {http_err}")
+        except ConnectionError as conn_err:
+            logging.error(f"Connection error occurred while downloading PDF: {conn_err}")
+        except Timeout as timeout_err:
+            logging.error(f"Timeout error occurred while downloading PDF: {timeout_err}")
+        except requests.RequestException as req_err:
+            logging.error(f"An error occurred while downloading PDF: {req_err}")
+        except IOError as io_err:
+            logging.error(f"File operation error: {io_err}")
+        return None
 
     def _parse_pdf_to_text(self, pdf_path) -> str:
         '''
@@ -585,118 +775,126 @@ class ReviewArxivPaper:
         for page in doc:
             # print(page.number, page.get_text()[:20])
             text += page.get_text()
+        logger.info(f"PDF parsed to text, page count{len(doc)}, text length: {len(text)}")
         return text
 
-    def _get_key_research_topics(self, publication: Publication) -> str:
-        '''
-        从论文中提取关键研究方向
-        '''
-        # 实现提取逻辑
-    def _get_triage_qa(self, publication: Publication) -> str:
-        '''
-        从论文中提取关键问题
-        '''
-        # 实现提取逻辑
     def _review_paper_with_ai_experts(self, publication: Publication) -> PaperScores:
         '''
         使用 OpenAI 接口分析文本，并根据不同标准进行评分
         '''
         try:
-            # 0. 先让论文总结研究的关键方向, 
+            # 0. 先让论文总结研究的关键方向
             topic_summary_config = PaperReviewConfig.ai_assistants_config[AIAssistantType.TOPIC_SUMMARY]
             topic_summary_assistant = TopicSummaryAssistant(topic_summary_config)
+            logger.info(f'calling {topic_summary_assistant} to process paper {publication.paper_id}')
             topic_result = topic_summary_assistant.do_work(publication, context="")
-            if not topic_result:
-                if not publication.keywords:
-                    publication.keywords = topic_result.get('keywords', '')
-                if not publication.research_topics:
-                    publication.research_topics = topic_result.get('research_topics', '')
+            logger.info(f"Topic summary result: {topic_result}")
+            
             # 1. 让AI总结论文的几个关键问题, 以及答案，辅助推理
-            triage_assistant_config = PaperReviewConfig.ai_assistants_config[AIAssistantType.PAPER_TRIAGE]
-            triage_assistant = TraigeAssistant(triage_assistant_config)
+            if topic_result:
+                if publication.keywords:
+                    publication.keywords =','.join(topic_result.get('keywords', 'N/A'))
+                if publication.research_topics:
+                    publication.research_topics = ','.join(topic_result.get('research_topics', ''))
+            
+            traige_assistant_config = PaperReviewConfig.ai_assistants_config[AIAssistantType.PAPER_TRIAGE]
+            traige_assistant = TraigeAssistant(traige_assistant_config)
             context = ''
             if publication.research_topics:
                 context = f"Here are some key research topics: {publication.research_topics}"
-            triage_qa_result = triage_assistant.do_work(publication, context)
-            # save triage result
-            if triage_qa_result:
-                publication.triage_qa = triage_qa_result
-            # 
+            traige_summary = traige_assistant.do_work(publication, context)
+            # save traige result
+            if traige_summary:
+                publication.triage_qa = traige_summary
+            logger.info(f"Triaging result: {traige_summary}")
+            
             # 2. 让AI 根据初步的信息来打分，自动检索相关核心问题的state of the art 研究成果作为补充判断
             reviwer_general = PaperReviewConfig.ai_assistants_config[AIAssistantType.REVIEWER_GENERAL]
             reviewer_general_assistant = DomainExpertReviewAssistant(reviwer_general)
-            init_score = reviewer_general_assistant.do_work(publication, context=triage_qa_result)
-            if not init_score:
-                raise ValueError("Invalid response from OpenAI API.")
-            # 2.1. 处理初步评分结果
+            init_score = reviewer_general_assistant.do_work(publication, traige_summary=traige_summary, previous_review_json='')
+            logger.info(f'Initial score is: {init_score}')
+            
+            # 2.1. 处理初步评分结果            
             score = PaperScores(
-                paper_id= publication.id,
+                paper_id= publication.paper_id,
                 title=publication.title,
-                innovation_score=init_score.get('innovation_score', 0.0),
-                innovation_reason=init_score.get('innovation_reason', 'N/A'),
-                performance_score=init_score.get('performance_score', 0.0),
-                performance_reason=init_score.get('performance_reason', 'N/A'),
-                simplicity_score=init_score.get('simplicity_score', 0.0),
-                simplicity_reason=init_score.get('simplicity_reason', 'N/A'),
-                reusability_score=init_score.get('simplicity_score', 0.0),
-                reusability_reason=init_score.get('simplicity_reason', 'N/A'),
-                authority_score=init_score.get('authority_score', 0.0),
-                authority_reason=init_score.get('authority_reason', 'N/A'),
-                weighted_score= 0.0,
-                recommend=init_score.get('recommend', False),
-                recommend_reason=init_score.get('recommend_reason', ''),
-                who_should_read=init_score.get('who_should_read', ''),
-                confidence_score=init_score.get('confidence', 0.0),
                 ai_reviewer= reviewer_general_assistant.name,
-                review_status="success",
+                review_status="pending",
                 error_message="",
                 log=f"AI reviewer {reviewer_general_assistant.name} reviewed the paper and provided initial score."
             )
+            score = self._assign_score_values(score=score, json_score=init_score)
+            score.review_status='completed'
+            logger.info(f"sucessfully init a score object: {score}")
+            
             # 3: 遍历领域专家，对打分进行核查和修正
             domain_reviwers = self._load_domain_review_assistants()
             for expert_name, expert_assistant in domain_reviwers.items():
-                logger.info(f"Processing paper {publication.id} with expert {expert_name}")
-                expert_score = expert_assistant.do_work(publication, context=triage_qa_result)
+                logger.info(f"Processing paper“ {publication.paper_id} ” with expert {expert_name}")
+                expert_score = expert_assistant.do_work(publication, traige_summary=traige_summary, previous_review_json=init_score)
                 if expert_score and expert_score.get("confidence"):
-                    # <0.75, 认为该专家跟跟此论文无关。 否则判断和合并专家的结果
+                    #判断和合并专家的结果
                     if expert_score.get('confidence') > score.confidence_score:
-                        score.innovation_score = expert_score.get('innovation_score')
-                        score.innovation_reason = expert_score.get('innovation_reason')
-                        score.performance_score = expert_score.get('performance_score')
-                        score.performance_reason = expert_score.get('performance_reason')
-                        score.simplicity_score = expert_score.get('simplicity_score')
-                        score.simplicity_reason = expert_score.get('simplicity_reason')
-                        score.reusability_score = expert_score.get('simplicity_score')
-                        score.reusability_reason = expert_score.get('simplicity_reason')
-                        score.authority_score = expert_score.get('authority_score')
-                        score.authority_reason = expert_score.get('authority_reason')
-                        score.recommend = expert_score.get('recommend')
-                        score.recommend_reason = expert_score.get('recommend_reason')
-                        score.who_should_read = expert_score.get('who_should_read')
-                        score.confidence_score = expert_score.get('confidence')
-                        score.ai_reviewer = ','.join(score.ai_reviewer, expert_assistant.name)
-                        score.review_status = "success"
+                        logger.info(f"Expert {expert_name} provided a valid review/updates.")
+                        score = self._assign_score_values(score=score, json_score=expert_score)
+                        score.ai_reviewer = expert_assistant.name
+                        score.review_status = "rewrited by expert"
                         score.error_message = ""
-                        score.log ='\n'.join(score.log, f"Expert {expert_name} reviewed the paper and provided update: {score.get_review_status()}")
+                        score.log ='\n'.join([score.log, f"Expert {expert_name} reviewed the paper and provided update: {score.get_review_status()}"])
                     else:
-                        score.log = '\n'.join(score.log,f"Expert {expert_name} reviewed the paper, but confidence is low.")
+                        score.log = '\n'.join([score.log,f"Expert {expert_name} reviewed the paper, but confidence is low."])
                 else:
-                    score.log = '\n'.join(score.log, f"Expert {expert_name} reviewed the paper but no valid score provided.")
-            # 4. 计算综合得分
-            score.weighted_score = round(0.35*score.innovation_score + 
-                                         0.25*score.performance_score + 
-                                        0.15*score.simplicity_score + 
-                                        0.15*score.reusability_score + 
-                                        0.1*score.authority_score,
-                                        2)
-            score.log = '\n'.join(score.log, f"Final score calculated: {score.weighted_score}")
+                    score.log = '\n'.join([score.log, f"Expert {expert_name} reviewed the paper but no valid score provided."])
+            
+            logger.info(f"Congratulate, AI experts reviewed the paper and the final status are: {score.get_review_status()}")
             return score       
         except Exception as e:
-            logger.error(f"Error processing paper {publication.id}: {e}")
+            logger.error(f"Error processing paper “{publication.paper_id}”: {e}")
             raise e
+    
+    def _assign_score_values(self, score:PaperScores, json_score:dict):
+        if not json_score or not json_score.get('dimensions'):
+            raise ValueError("Invalid json data, unable to retrieve score data.")
+        dimensions = json_score.get('dimensions')
+        score.innovation_score=0.0 if not dimensions.get('innovation') else dimensions.get('innovation').get('score',0.0)
+        score.innovation_reason='N/A' if not dimensions.get('innovation') else dimensions.get('innovation').get('reason','N/A')
+        score.performance_score=0.0 if not dimensions.get('performance') else dimensions.get('performance').get('score',0.0)
+        score.performance_reason='N/A' if not dimensions.get('performance') else dimensions.get('performance').get('reason','N/A')
+        score.simplicity_score=0.0 if not dimensions.get('simplicity') else dimensions.get('simplicity').get('score',0.0)
+        score.simplicity_reason='N/A' if not dimensions.get('simplicity') else dimensions.get('simplicity').get('reason','N/A')
+        score.reusability_score=0.0 if not dimensions.get('reusability') else dimensions.get('reusability').get('score',0.0)
+        score.reusability_reason='N/A' if not dimensions.get('reusability') else dimensions.get('reusability').get('reason','N/A')
+        score.authority_score=0.0 if not dimensions.get('authority') else dimensions.get('authority').get('score',0.0)
+        score.authority_reason='N/A' if not dimensions.get('authority') else dimensions.get('authority').get('reason','N/A')
+        
+        # Calculate the weighted score and round it to 2 decimal places
+        score.weighted_score = round(0.35*score.innovation_score + 
+                                    0.25*score.performance_score + 
+                                0.15*score.simplicity_score + 
+                                0.15*score.reusability_score + 
+                                0.1*score.authority_score,
+                                2)
+        # Assign other fields directly from the JSON
+        score.recommend=str(json_score.get('recommend', False)).lower() in ('yes', 'true', '1')
+        score.recommend_reason=json_score.get('reason', '')
+        score.who_should_read=json_score.get('who_should_read', '')
+        score.confidence_score=json_score.get('confidence', 0.0)
+        
+        return score
     
     def _load_domain_review_assistants(self) -> Dict[AIAssistantType, DomainExpertReviewAssistant]:
         assistants = {}
+        # 只加载domain_xxx的专家。 TODO： 这里的逻辑可以再优化，当前简单按字符串过滤
         for assistant_type, config in PaperReviewConfig.ai_assistants_config.items():
+            if not assistant_type.value.lower().startswith('domain_reviewer'):
+                continue
             assistants[assistant_type] = DomainExpertReviewAssistant(config)
+            logger.info(f"Loaded domain review assistants: {assistant_type}'")
         return assistants
+
+    def _clean_db_str_input(self, text:str):
+        if text is None:
+            return ""
+        # Remove NUL characters
+        text = text.replace('\x00', '')
+        return text

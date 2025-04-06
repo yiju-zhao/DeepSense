@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import logging
+import sys
 import uuid
 from typing import Annotated, Any, Optional
 
@@ -8,10 +9,21 @@ from sqlalchemy.orm import Session
 from fastapi import Query
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
+from core.review_arxiv_paper import ReviewArxivPaper
 from core.arxiv_crawler import ArxivApiArgs, ArxivCrawler
 from database import SessionLocal
-from models.tasks import ArxivPaper, CrawlerTask, CrawlerTaskActionResponse, CrawlerTaskCreate, CrawlerTaskList, CrawlerTaskResponse, CrawlerTaskUpdate, Publication, TaskExecution, TaskExecutionList, TaskExecutionResponse, TaskStatus
+from models.tasks import ArxivPaper, CrawlerTask, CrawlerTaskActionResponse, CrawlerTaskCreate, CrawlerTaskList, CrawlerTaskResponse, CrawlerTaskUpdate, PaperScores, Publication, StandardResponse, TaskExecution, TaskExecutionList, TaskExecutionResponse, TaskStatus
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('app.log')
+    ]
+)
+# Create logger for this module
 logger = logging.getLogger(__name__)
 
 def get_db():
@@ -153,63 +165,121 @@ async def task_action(db: db_dependency, task_id: int, action: str, background_t
         # 删除任务,要先停止任务
         db.delete(task)
         db.commit()
-        return {"message": "Task deleted successfully","task_id": task_id}
+        return {"success":True, "message": "Task deleted successfully","task_id": task_id}
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
 
     db.commit()
-    return {"message": f"Task {action}ed successfully", "task_id": task_id}
+    return {"success":True, "message": f"Task {action}ed successfully", "task_id": task_id}
 
 
-@router.post("/paper/{paper_id}/review", response_model=TaskExecutionResponse)
-def paper_review_by_id(
-    db: db_dependency,
-    paper_id: int
-):
+@router.get("/paper/{paper_id}", response_model=StandardResponse)
+async def get_paper_by_id(db: db_dependency, paper_id: str):
+    """
+    retrive a paper from db, contains paper basic info and the AI scores
+    """
+    return_paper = (
+        db.query(Publication, PaperScores)
+        .outerjoin(PaperScores, Publication.paper_id == PaperScores.paper_id)
+        .filter(Publication.paper_id == paper_id)
+        .first()
+    )
+    if return_paper:
+        return StandardResponse(
+            success=True,
+            message=f"Paper with ID {paper_id} retrieved successfully.",
+            data={'paper': return_paper})
+    else:
+        return StandardResponse(
+            success=False,
+            message=f"Paper with ID {paper_id} not found.",
+            data={})
+
+@router.post("/reviewpaper/{paper_id}", response_model=StandardResponse)
+async def paper_review_by_id(db: db_dependency, paper_id: str):
     """
     review a paper, add a comments and score, by paper id
     """
-    # 从ArxivPaper 表中根据ID查询，如果该ID已经存在于Publication，说明我处理过了，直接返回，并跳过
-    # 查询 ArxivPaper 表，并左连接 Publication 表
-    paper = (
-        db.query(ArxivPaper)
-        .outerjoin(Publication, ArxivPaper.id == Publication.id)
-        .filter(Publication.id == paper_id)
-        .add_columns(Publication.id)
-        .first()
-    )
+    # 从ArxivPaper 表中根据ID查询，如果该ID已经存在于Publication，且score 表存在该记录，说明我处理过了，直接返回，并跳过
+    scores = db.query(PaperScores).filter(PaperScores.paper_id == paper_id).first()
 
     # 检查是否在 Publication 表中已存在对应的 id
-    if paper and paper.paper_id is not None:
-        # 该 ID 已存在于 Publication 表中，说明已处理过，直接返回或跳过
-        return
+    if scores and scores.paper_id is not None:
+        # 该 ID 已存在于 PaperScores 表中，说明已处理过
+        rerun= False
+        if rerun:
+            # TODO 在此处添加您的处理逻辑
+            logger.info(f"Paper with ID {paper_id} already exists in PaperScores table. Rerunning...[等待实现]")
+            pass
+        else:
+            # 不需要重新运行，直接返回
+            logger.info(f"Paper with ID {paper_id} already exists in PaperScores table. Skipping.") 
+        return StandardResponse(
+            success=True,
+            message=f"Paper with ID {paper_id} already exists in PaperScores table. Skipping.",
+            data={"scores": scores}
+        )
     else:
-        # 该 ID 不存在于 Publication 表中，继续处理
-        # TODO 在此处添加您的处理逻辑
-        pass
+        # 该 ID 不存在于 PaperScores 表中，继续处理
+        paper = db.query(ArxivPaper).filter(ArxivPaper.arxiv_id == paper_id).first()
+        if not paper:
+            logger.error(f"Paper with ID {paper_id} not found")
+            return StandardResponse(
+                success=False,
+                message=f"Paper with ID {paper_id} not found"
+            )
+        arxiv_review = ReviewArxivPaper()
+        score = arxiv_review.process(paper)
+        logger.info(f'hey: {score}')
+        if not score:
+            logger.error(f"Failed to process paper with ID {paper_id}")
+            return StandardResponse(
+                success=False,
+                message=f"Failed to process paper with ID {paper_id}")
+        
+        return StandardResponse(
+            success=True,
+            message=f"Paper with ID {paper_id} processed successfully.",
+            data={"scores": score}
+        )
 
-@router.post("/paper/batch_review", response_model=TaskExecutionResponse)
-def paper_review_batch_execution(
-    db: db_dependency
-):
+@router.post("/reviewpaper_batch", response_model=StandardResponse)
+def paper_review_batch_execution(db: db_dependency):
     """
     review a paper, add a comments and score, in a batch way
     """
     unprocessed_papers = (
         db.query(ArxivPaper)
-        .outerjoin(Publication, ArxivPaper.id == Publication.id)
-        .filter(Publication.id.is_(None))
-        .add_columns(Publication.id)
+        .outerjoin(PaperScores, ArxivPaper.arxiv_id == PaperScores.paper_id)
+        .filter(PaperScores.paper_id.is_(None))
         .all()
-    )# 检查 unprocessed_papers 是否为空
+    )
+    # 检查 unprocessed_papers 是否为空
     if unprocessed_papers:
-        # 遍历所有未处理的论文
-        for paper in unprocessed_papers:
-            # 在此处添加处理每篇论文的逻辑
-            process_paper(paper)
+        logger.info(f"共找到 {len(unprocessed_papers)} 篇未处理的论文")
+        arxiv_review = ReviewArxivPaper()
+        scores = arxiv_review.process_batch(unprocessed_papers)
+        if not scores or len(scores) == 0:
+            logger.error("批量处理论文失败")
+            return StandardResponse(
+                success=False,
+                message="批量处理论文失败",
+            )
+        elif len(scores) != len(unprocessed_papers):
+            logger.error(f"批量处理论文成功，但处理的论文数量不匹配: {len(scores)} vs {len(unprocessed_papers)}")
+            return StandardResponse(
+                success=False,
+                message=f"批量处理论文成功，但处理的论文数量不匹配: {len(scores)} vs {len(unprocessed_papers)}",
+                data={"scores": scores}
+            )
     else:
-        print("没有未处理的论文。")
-
+        logger.info("没有找到未处理的论文")
+        return {"message": "没有找到未处理的论文"}
+    return StandardResponse(
+        success=True,
+        message=f"共处理 {len(unprocessed_papers)} 篇论文",
+        data={"scores": scores}
+    )
 
 
 # 辅助函数：追加日志信息
@@ -292,6 +362,7 @@ async def execute_task(task_id: int):
                     new_paper = ArxivPaper(
                         arxiv_id=paper_data.get("arxiv_id"),
                         title=paper_data.get("title"),
+                        pdf_url=paper_data.get("pdf_url"),
                         published=paper_data.get("published"),
                         summary=paper_data.get("summary"),
                         authors=paper_data.get("authors"),
