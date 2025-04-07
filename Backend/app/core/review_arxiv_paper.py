@@ -2,7 +2,7 @@
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 import json
 import logging
@@ -260,6 +260,27 @@ class DomainExpertReviewAssistant(BaseAssistant):
         logger.info(f"Prompt for Domain Expert [{self.name}] Review Assistant: {prompt[:200]}")
         return self._get_response(publication=publication, prompt=prompt)
 
+class DailyReportAssistant(BaseAssistant):
+    def __init__(self, config: dict):
+        super().__init__(config)
+        self.name = config.get('name')
+        self.model_name = config.get('model_name')
+        self.prompt = config.get('prompt')
+        self.instruction = config.get('instruction')
+    
+    def do_work(self, day_date:date, top_k:int, context:str):
+        if not day_date:
+            day_date = datetime.now().date()
+        # 以下是{date}的Top {top_k} 论文的总结信息，数据为Json格式：
+        #            {paper_data}
+        prompt = self.prompt.format(
+            date=str(day_date),
+            top_k=top_k,
+            paper_data=str(context))
+        
+        logger.info(f"Prompt for Topic Summary Assistant: {prompt[:200]}")
+        return self._get_response(publication=None, prompt=prompt)
+
 class AIAssistantType(Enum):
     PAPER_TRIAGE = "paper_triage"
     TOPIC_SUMMARY = "topic_summary"
@@ -269,6 +290,7 @@ class AIAssistantType(Enum):
     DOMAIN_REVIEWER_CLUSTER = "domain_reviewer_cluster"
     DOMAIN_REVIEWER_CHIP = "domain_reviewer_chip"
     DOMAIN_REVIEWER_NETWORK = "domain_reviewer_network"
+    DAILY_REPORT_SUMMARY ="daily_report_summary"
     # xxx_domain 可以注入更多定制化的专家
 
 class PaperReviewConfig:
@@ -282,9 +304,8 @@ class PaperReviewConfig:
                     "setup", "implementation details", "evaluation", "evaluation setup"},
         "ablation":{"ablation","ablation study"},
         "results": {"results", "performance", "findings", "observations", "empirical results"},
-        "discussion": {"discussion", "analysis", "interpretation"},
         "summary":{"summary"},
-        "conclusion": {"conclusion", "final remarks", "closing remarks"},
+        "conclusion": {"conclusion", "final remarks", "closing remarks","discussion"},
         "limitations":{"limitations"},
         "acknowledgments": {"acknowledgments", "acknowledgements", "funding", "author contributions"},
         "references": {"references", "bibliography", "cited works"},
@@ -544,6 +565,52 @@ class PaperReviewConfig:
                         Return your response strictly in the following JSON format (do not include any additional text or Markdown formatting)""", 
         },
         # TODO: 其他领域的评审助手配置
+        AIAssistantType.DAILY_REPORT_SUMMARY: {
+            "name": "daily_report_summary",
+            "model_name": "gpt-4o",
+            'instruction': """Your task is to generate a concise, easy-to-read daily report summarizing the key insights from the top N research papers of the day. The final report should be written in Markdown format and presented as a JSON object, enabling readers to quickly understand the takeaways and feel compelled to explore more.
+                    Steps:
+                        1.	Global Analysis:
+                        •	Theme Extraction: Analyze the provided JSON data to identify the dominant themes. Extract 3–5 primary topics from the abstracts and triage QA fields.
+                        •	Innovation Clustering: Review the “innovation_reason” field to highlight clusters of technological innovations and emerging methods.
+                        2.	Highlight Extraction:
+                        •	Breakthrough Methods: Identify papers with an innovation_score of 8 or higher that introduce breakthrough methods.
+                        •	Authoritative Research: Flag papers with an authority_score of 9 or above, especially those with renowned authors.
+                        •	Reusability Potential: Highlight papers with a reusability_score of 8 or above, indicating strong potential for reuse.
+                        3.	Quality and Feasibility Comparison:
+                        •	Performance Comparison: Compare the dataset quality by examining SOTA comparisons in the performance_reason field.
+                        •	Engineering Feasibility: Analyze the distribution of simplicity_score to assess how practical and implementable the methods are.
+                        •	Anomaly Detection: Flag any papers with a confidence_score below 0.8 as potential anomalies that may require further scrutiny.
+                        4.	Report Composition:
+                        •	Structure & Style: Compose a concise Markdown report that includes:
+                        •	A brief summary table with key metrics.
+                        •	Hyperlinks to the highlighted papers.
+                        •	A clear conclusion with key takeaways, using emojis (💥, 🚀, 🔥) to emphasize important points.
+                        •	Tone: Combine academic rigor with an engaging, modern style. Keep the language crisp and direct—this is an introductory briefing meant to quickly inform and attract further reading, not a detailed technical analysis.
+
+                    Output Format:
+
+                    Return your result strictly as a JSON object with the following structure:
+                    {{
+                        "day_date": "YYYY-MM-DD",
+                        "markdown_report": "Your concise daily report in markdown format"
+                    }}""",
+            'prompt': """
+                    Below is the preliminary JSON summary of the top {top_k} papers for {date}:
+                    {paper_data}
+                    
+                    In addition to the information above, please ensure your report is informative and precise—avoid vague or generic statements. You should consider the following points in your report:
+                        1.	Recommendation Rationale (in less than 144 words): Include key innovation highlights, practical value, and authoritative endorsements.
+                        2.	Provocative Questions (5 in total): Formulate one question each about methodology, application scenarios, and the overall impact on the field.
+                        3.	Curiosity Hook: Use a “What if…?” style sentence to spark interest.
+
+                    Your final output should be a concise Markdown report, returned as JSON in the following structure:
+                    {{
+                        "day_date": "YYYY-MM-DD",
+                        "markdown_report": "Your concise daily report in markdown format"
+                    }}
+                    """,
+        },
     }
 
 class ReviewArxivPaper():
@@ -619,8 +686,8 @@ class ReviewArxivPaper():
                     year= paper.published.strftime('%Y'),
                     publish_date=paper.published,
                     tldr='',
-                    abstract=self._clean_db_str_input(paper.summary if paper.summary else abstract_text),
-                    conclusion= self._clean_db_str_input(conclusion_text),
+                    abstract=self._clean_db_str_input(paper.summary if paper.summary else abstract_text)[:5000], # TODO: 有没有更好的办法处理，当前默认conclusion/abstract在5000字符以内
+                    conclusion= self._clean_db_str_input(conclusion_text)[:5000], # TODO: 有没有更好的办法处理，当前默认conclusion/abstract在5000字符以内
                     content_raw_text= self._clean_db_str_input(main_context),
                     reference_raw_text=self._clean_db_str_input(references_text),
                     pdf_path= relative_path,  #存储相对路径，方便系统迁移
@@ -661,8 +728,8 @@ class ReviewArxivPaper():
         '''
         批量处理论文
         '''
-        # TODO: 一次处理两篇论文，调试完成后删除
-        paper_list = paper_list[:2]
+        # TODO: 一次处理50篇论文，试运行稳定后删除
+        paper_list = paper_list[:50]
         results = []
         # 使用线程池并发处理
         max_threads = 4  # 根据您的系统和任务需求调整线程数
@@ -679,6 +746,16 @@ class ReviewArxivPaper():
         
         return results
 
+    def get_ai_daily_report(self, report_day:date, top_k:int, context:str) ->str:
+        # 调用大模型来撰写每日报告 TODO: 这个函数不应该放在这个类，待改进
+        # step 1: 是否数据库已经生成了，如果有，就直接返回
+        # step 2: 调用大模型来做
+        daily_summary_config = PaperReviewConfig.ai_assistants_config[AIAssistantType.DAILY_REPORT_SUMMARY]
+        daily_report_assistant = DailyReportAssistant(daily_summary_config)
+        logger.info(f'calling {daily_report_assistant.name} to generate daily report for date: {report_day}')
+        report_result = daily_report_assistant.do_work(day_date=report_day,top_k=top_k, context=context)
+        return report_result
+    
     def _detect_section_titles(self,lines):
         """检测标题行，返回标题行索引"""
         title_indices = {}
@@ -778,6 +855,7 @@ class ReviewArxivPaper():
         logger.info(f"PDF parsed to text, page count{len(doc)}, text length: {len(text)}")
         return text
 
+    
     def _review_paper_with_ai_experts(self, publication: Publication) -> PaperScores:
         '''
         使用 OpenAI 接口分析文本，并根据不同标准进行评分

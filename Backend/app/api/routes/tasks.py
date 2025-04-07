@@ -5,6 +5,7 @@ import uuid
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, logger
+from sqlalchemy import desc
 from sqlalchemy.orm import Session, load_only
 from fastapi import Query
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -283,6 +284,73 @@ async def get_all_papers(
         data={"papers": sorted_data, "count": total_count}
     )
 
+@router.get("/dailyreport", response_model=StandardResponse)
+async def get_daily_report(
+    db: db_dependency,
+    day_date: Optional[date] = Query(None, description="which day?, if none, it is today")
+):
+    """
+    get daily report.
+    """
+    # 先查询日期是否已经成报告，如果是，直接返回，待实现
+    if not day_date:
+        day_date = datetime.now().date
+    logger.info('Starting to generate the daily report for day: {day_date}....')
+    # 首先查询当天的论文top 10
+
+    publication_list = (
+            db.query(Publication)
+                .filter(Publication.paper_id != None, Publication.publish_date>=day_date, Publication.publish_date<=day_date)
+                .offset(0).limit(10).all()  
+            ) 
+    if not publication_list:
+        return StandardResponse(
+            success= False,
+            message='no paper found',
+            data={}
+        )
+    logger.info(f'query table Publication and found {len(publication_list)} records')
+    return_data = []
+    for publication in publication_list:
+        # TODO: 未来会改成，待把作者信息清洗后，就不需要再查询ArxivPaper
+        arxiv_paper = db.query(ArxivPaper).filter(ArxivPaper.arxiv_id == publication.paper_id).first()
+        item_data = {
+            'paper_id':publication.paper_id,
+            'publish_date':publication.publish_date,
+            'title':publication.title,
+            'pdf_url':publication.pdf_url,
+            'abstract':publication.abstract,
+            'author':arxiv_paper.authors,
+            'conclusion':publication.conclusion,
+            'traige_qa':publication.triage_qa,
+            'scores':publication.scores if publication.scores else "{'review_status':'pending','error_message':'not processed yet'}",
+            'weighted_score': publication.scores.weighted_score if publication.scores else 0
+        }
+        return_data.append(item_data)
+    
+    # 默认把分数最高的放前面，然后按照日期来排序， TODO: 需要支持更多的方式
+    sorted_data = sorted(
+        return_data,
+        key=lambda x: (x['weighted_score'], x['publish_date']),
+        reverse=True
+    )
+    
+    paper_today_response = sorted_data[:10] #TODO, 去掉限制
+    total_count = len(paper_today_response)
+    logger.info(f'get the daily paper recommend: {str(paper_today_response)}') 
+    #paper_list = paper_today_response.get('data').get('papers')
+    #count = paper_today_response.get('data').get('count')
+    
+    logger.info(f'get the daily paper recommend: {str(paper_today_response)[:500]}')
+    logger.info(f'Calling AI to get the daily report....')
+    arxiv_review = ReviewArxivPaper()
+    report = arxiv_review.get_ai_daily_report(report_day=day_date,top_k=total_count,context=str(paper_today_response))
+    return StandardResponse(
+            success=True,
+            message=f'recieved the daily report for today: {day_date}',
+            data= report
+    )
+
 @router.post("/reviewpaper/{paper_id}", response_model=StandardResponse)
 async def paper_review_by_id(db: db_dependency, paper_id: str):
     """
@@ -339,6 +407,7 @@ def paper_review_batch_execution(db: db_dependency):
         db.query(ArxivPaper)
         .outerjoin(PaperScores, ArxivPaper.arxiv_id == PaperScores.paper_id)
         .filter(PaperScores.paper_id.is_(None))
+        .order_by(desc(ArxivPaper.published))
         .all()
     )
     # 检查 unprocessed_papers 是否为空
