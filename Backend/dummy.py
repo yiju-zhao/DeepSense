@@ -53,6 +53,9 @@ class Paper(BaseModel):
     keywords: List[str]
     citations: int
     organization: str
+    ai_score: Optional[float] = None
+    reason: Optional[str] = None
+    audience: Optional[str] = None
 
 class ChatMessage(BaseModel):
     message: str
@@ -164,7 +167,10 @@ DUMMY_PAPERS = [
         abstract="This paper explores the application of large language models in scientific research...",
         keywords=["LLM", "Scientific Discovery", "AI"],
         citations=45,
-        organization="Stanford University"
+        organization="Stanford University",
+        ai_score=0.95,
+        reason="The paper is a good example of how LLMs can be used to discover new scientific insights.",
+        audience="Beginner"
     ),
     Paper(
         id="2",
@@ -175,7 +181,10 @@ DUMMY_PAPERS = [
         abstract="A novel approach to automated neural architecture search...",
         keywords=["Neural Architecture", "AutoML", "Optimization"],
         citations=89,
-        organization="MIT"
+        organization="MIT",
+        ai_score=0.90,
+        reason="The paper is a good example of how LLMs can be used to discover new scientific insights.",
+        audience="Intermediate"
     ),
     Paper(
         id="3",
@@ -186,7 +195,10 @@ DUMMY_PAPERS = [
         abstract="This paper explores the application of cooperative hardware in scientific research...",
         keywords=["Cooperative Hardware", "Prompt Learning", "Snapshot Compressive Imaging"],
         citations=100,
-        organization="University of Toronto"
+        organization="University of Toronto",
+        ai_score=0.85,
+        reason="The paper is a good example of how LLMs can be used to discover new scientific insights.",
+        audience="Intermediate"
     ),
     Paper(
         id="4",
@@ -194,10 +206,13 @@ DUMMY_PAPERS = [
         authors=["Fei Ni", "Jianye HAO", "Shiguang Wu", "Longxin Kou", "Yifu Yuan", "Zibin Dong", "Jinyi Liu", "MingZhi Li", "Yuzheng Zhuang", "YAN ZHENG"],
         conference="NeurIPS",
         year=2024,
-        abstract="This paper explores the application of cooperative hardware in scientific research...",
+        abstract="This paper explores the application of cooperative hardware in scientific research... I want to test a long abstract. I want to test a long abstract. I want to test a long abstract. I want to test a long abstract. I want to test a long abstract",
         keywords=["Perceive, Reason, Imagine, Act via Holistic Language and Vision Planning for Manipulation"],
         citations=100,
-        organization="University of Pennsylvania"
+        organization="University of Pennsylvania",
+        ai_score=0.80,
+        reason="The paper is a good example of how LLMs can be used to discover new scientific insights.",
+        audience="Advanced"
     ),
     Paper(
         id="5",
@@ -206,9 +221,54 @@ DUMMY_PAPERS = [
         conference="NeurIPS",
         year=2025,
         abstract="This paper discusses the design and implementation of tools for technical insight teams...",
-        keywords=["LLM, Tools, Technical Insight"],
+        keywords=["LLM", "Tools", "Technical Insight"],
         citations=0,
-        organization="University of Toronto"
+        organization="University of Toronto",
+        ai_score=0.75,
+        reason="The paper is a good example of how LLMs can be used to discover new scientific insights.",
+        audience="Beginner"
+    ),
+    Paper(
+        id="6",
+        title="Transformer-based Approaches for Code Generation",
+        authors=["David Chen", "Sarah Miller"],
+        conference="ICML",
+        year=2024,
+        abstract="An innovative study on using transformer architectures for automated code generation...",
+        keywords=["Transformers", "Code Generation", "Deep Learning"],
+        citations=65,
+        organization="Stanford University",
+        ai_score=0.88,
+        reason="Novel application of transformers in software engineering with promising results.",
+        audience="Intermediate"
+    ),
+    Paper(
+        id="7",
+        title="Federated Learning in Healthcare Systems",
+        authors=["Emma Wilson", "James Taylor", "Michael Chang"],
+        conference="ICSME",
+        year=2024,
+        abstract="Exploring privacy-preserving machine learning techniques in healthcare applications...",
+        keywords=["Federated Learning", "Healthcare", "Privacy"],
+        citations=32,
+        organization="Harvard University",
+        ai_score=0.92,
+        reason="Important contribution to privacy-preserving AI in healthcare.",
+        audience="Advanced"
+    ),
+    Paper(
+        id="8",
+        title="Quantum Computing Applications in Cryptography",
+        authors=["Alex Johnson", "Lisa Zhang"],
+        conference="ISSTA",
+        year=2024,
+        abstract="A comprehensive analysis of quantum computing's impact on modern cryptographic systems...",
+        keywords=["Quantum Computing", "Cryptography", "Security"],
+        citations=78,
+        organization="MIT",
+        ai_score=0.87,
+        reason="Groundbreaking research connecting quantum computing and security.",
+        audience="Advanced"
     )
 ]
 
@@ -247,7 +307,7 @@ async def get_papers(
     keyword: Optional[str] = None
 ):
     filtered_papers = DUMMY_PAPERS
-    
+
     if conference:
         filtered_papers = [p for p in filtered_papers if p.conference == conference]
     if year:
@@ -256,7 +316,7 @@ async def get_papers(
         filtered_papers = [p for p in filtered_papers if p.organization == organization]
     if keyword:
         filtered_papers = [p for p in filtered_papers if keyword.lower() in [k.lower() for k in p.keywords]]
-    
+
     return filtered_papers
 
 @app.get("/api/v1/papers/{paper_id}", response_model=Paper)
@@ -296,7 +356,7 @@ async def chat(message: ChatMessage):
         "The key innovation appears to be their novel architecture design, which reduces computational complexity.",
         "According to the experimental results, the proposed method outperforms existing solutions in both efficiency and accuracy."
     ]
-    
+
     return ChatMessage(
         message=message.message,
         response=random.choice(responses)
@@ -306,10 +366,10 @@ async def chat(message: ChatMessage):
 async def get_audio():
     # For demo purposes, we'll serve a static audio file
     audio_path = Path(__file__).parent.parent / "Frontend/public/assets/audio/new-divide.mp3"
-    
+
     if not audio_path.exists():
         return Response(content="Audio file not found", status_code=404)
-        
+
     audio_bytes = audio_path.read_bytes()
     return Response(
         content=audio_bytes,
@@ -322,4 +382,4 @@ async def get_audio():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)

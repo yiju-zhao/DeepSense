@@ -1,10 +1,18 @@
 import api, { Paper } from './api';
 
 export interface PaperFilters {
-  conference?: string;
-  year?: number;
-  organization?: string;
-  keyword?: string;
+  id: string;
+  title: string;
+  authors: string[];
+  conference: string;
+  year: number;
+  abstract: string;
+  keywords: string[];
+  citations: number;
+  organization: string;
+  ai_score?: number;
+  reason?: string;
+  audience?: string;  
 }
 
 export const paperService = {

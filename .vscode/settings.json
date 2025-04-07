@@ -1,0 +1,21 @@
+{
+    "launch": {
+        "version": "0.2.0",
+        "configurations": [
+            {
+                "type": "chrome",
+                "request": "launch",
+                "name": "Debug React App",
+                "url": "http://localhost:5173",
+                "webRoot": "${workspaceFolder}/Frontend",
+                "sourceMapPathOverrides": {
+                    "/__parcel_source_root/*": "${webRoot}/*"
+                },
+                "sourceMaps": true,
+                "skipFiles": [
+                    "<node_internals>/**"
+                ]
+            },
+        ]
+    }
+}

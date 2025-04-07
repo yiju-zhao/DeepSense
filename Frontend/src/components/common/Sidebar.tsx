@@ -93,7 +93,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onToggle }) => {
     onToggle(!isOpen);
   };
 
-  const isDailynewsRoute = location.pathname.startsWith('/dailynews');
+  const isDailypaperRoute = location.pathname.startsWith('/dailypaper');
 
   const mainMenuItems = [
     { text: 'Homepage', path: '/' },
@@ -102,10 +102,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ onToggle }) => {
     { text: 'Dailynews', path: '/dailynews', hasSubMenu: true },
   ];
 
-  const dailynewsSubMenuItems = [
-    { text: 'Dashboard', path: '/dailynews/dashboard' },
-    { text: 'Dataset', path: '/dailynews/dataset' },
-    { text: 'Deepdive', path: '/dailynews/deepdive' },
+  const dailypaperSubMenuItems = [
+    { text: 'Dashboard', path: '/dailypaper' },
+    { text: 'Dataset', path: '/dailypaper/dataset' },
+    { text: 'Deepdive', path: '/dailypaper/deepdive' },
   ];
 
   const handleMenuClick = (item: { text: string; path: string; hasSubMenu?: boolean }) => {
@@ -133,7 +133,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onToggle }) => {
         </ToggleButton>
         <Box sx={{ height: "24px" }} />
 
-        {isDailynewsRoute && isOpen ? (
+        {isDailypaperRoute && isOpen ? (
           <>
             <BackButton onClick={() => navigate("/")}>
               <img
@@ -144,7 +144,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onToggle }) => {
               <HomeText>Home</HomeText>
             </BackButton>
             <List>
-              {dailynewsSubMenuItems.map((item) => (
+              {dailypaperSubMenuItems.map((item) => (
                 <ListItem key={item.text} disablePadding>
                   <MenuItem
                     selected={location.pathname === item.path}
