@@ -1,0 +1,29 @@
+Generic single-database configuration with an async dialect.
+
+This is a generic alembic configuration for use with the DeepSight backend.
+It uses an async SQLAlchemy dialect with PostgreSQL.
+
+To create a new migration:
+```
+alembic revision --autogenerate -m "description of changes"
+```
+
+To upgrade to the latest revision:
+```
+alembic upgrade head
+```
+
+To downgrade to a previous revision:
+```
+alembic downgrade -1  # downgrade one revision
+alembic downgrade <revision>  # downgrade to specific revision
+```
+
+To get current revision:
+```
+alembic current
+```
+
+To get revision history:
+```
+alembic history
