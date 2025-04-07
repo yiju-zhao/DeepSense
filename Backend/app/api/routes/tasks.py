@@ -1,11 +1,11 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import logging
 import sys
 import uuid
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, logger
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 from fastapi import Query
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -177,23 +177,111 @@ async def task_action(db: db_dependency, task_id: int, action: str, background_t
 async def get_paper_by_id(db: db_dependency, paper_id: str):
     """
     retrive a paper from db, contains paper basic info and the AI scores
-    """
-    return_paper = (
-        db.query(Publication, PaperScores)
+    """    
+    publication = (
+        db.query(Publication)
         .outerjoin(PaperScores, Publication.paper_id == PaperScores.paper_id)
         .filter(Publication.paper_id == paper_id)
         .first()
     )
-    if return_paper:
+    # TODO 备注： 当前arxiv的部分元数据，比如作者和affiliation 还没有被转化到主数据表，当前暂且从arxiv 里面单独查询出来
+    arxiv_paper = db.query(ArxivPaper).filter(ArxivPaper.arxiv_id== paper_id).first()
+   
+    if publication and arxiv_paper:
+         # TODO: 全部返回给前端不合适，pdf 的raw data 太长了。另外，论文作者也待处理。 后续可以考虑直接建一个view
+        publication.content_raw_text = '' # 粗暴处理 remove it
+        publication.reference_raw_text =''
+        return_data = {
+            'paper_id':publication.paper_id,
+            'publish_date':publication.publish_date,
+            'title':publication.title,
+            'pdf_url':publication.pdf_url,
+            'abstract':publication.abstract,
+            'author':arxiv_paper.authors,
+            'conclusion':publication.conclusion,
+            'traige_qa':publication.triage_qa,
+            'scores':publication.scores if publication.scores else "{'review_status':'pending','error_message':'not processed yet'}",
+            'weighted_score': publication.scores.weighted_score if publication.scores else 0
+        }
+        
+       
         return StandardResponse(
             success=True,
             message=f"Paper with ID {paper_id} retrieved successfully.",
-            data={'paper': return_paper})
+            data=return_data)
     else:
         return StandardResponse(
             success=False,
             message=f"Paper with ID {paper_id} not found.",
             data={})
+
+@router.get("/papers", response_model=StandardResponse)
+async def get_all_papers(
+    db: db_dependency,
+    start_date: Optional[date] = Query("publish_date", description="start date to filter by, None means search all"),
+    end_date: Optional[date] = Query("publish_date", description="end date to filter by, None means to now"),
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(10, ge=1, le=100, description="Maximum number of records to return"),
+    sort_by: Optional[str] = Query("publish_date", description="Field to sort by: 'publish_date' or 'weighted_score'"),
+    order: Optional[str] = Query("desc", description="Sort order: 'asc' or 'desc'")
+):
+    """
+    Retrieve all papers from the database, along with their evaluation scores.
+    Supports pagination (skip, limit) and sorting by publish date or weighted score.
+    """
+    # Construct the base query joining Publication and PaperScores
+    if not start_date:
+        # 可以设置一个默认的起始日期，例如一个很早的日期或者当前日期
+        start_date = datetime(1970, 1, 1).date()  # 或者 datetime.now().date()        
+
+    if not end_date:
+        # 默认截止日期为当前日期
+        end_date = datetime.now().date()
+    
+    publication_list = (
+            db.query(Publication)
+                .filter(Publication.paper_id != None, Publication.publish_date>=start_date, Publication.publish_date<=end_date)
+                .offset(skip).limit(limit).all()  
+            ) 
+    
+    if not publication_list:
+        return StandardResponse(
+            success= False,
+            message='no paper found',
+            data={}
+        )
+    logger.info(f'query table Publication and found {len(publication_list)} records')
+    return_data = []
+    for publication in publication_list:
+        # TODO: 未来会改成，待把作者信息清洗后，就不需要再查询ArxivPaper
+        arxiv_paper = db.query(ArxivPaper).filter(ArxivPaper.arxiv_id == publication.paper_id).first()
+        item_data = {
+            'paper_id':publication.paper_id,
+            'publish_date':publication.publish_date,
+            'title':publication.title,
+            'pdf_url':publication.pdf_url,
+            'abstract':publication.abstract,
+            'author':arxiv_paper.authors,
+            'conclusion':publication.conclusion,
+            'traige_qa':publication.triage_qa,
+            'scores':publication.scores if publication.scores else "{'review_status':'pending','error_message':'not processed yet'}",
+            'weighted_score': publication.scores.weighted_score if publication.scores else 0
+        }
+        return_data.append(item_data)
+    
+    # 默认把分数最高的放前面，然后按照日期来排序， TODO: 需要支持更多的方式
+    sorted_data = sorted(
+        return_data,
+        key=lambda x: (x['weighted_score'], x['publish_date']),
+        reverse=True
+    )
+    
+    total_count = len(sorted_data)
+    return StandardResponse(
+        success=True,
+        message=f"Retrieved {total_count} papers.",
+        data={"papers": sorted_data, "count": total_count}
+    )
 
 @router.post("/reviewpaper/{paper_id}", response_model=StandardResponse)
 async def paper_review_by_id(db: db_dependency, paper_id: str):
@@ -230,7 +318,6 @@ async def paper_review_by_id(db: db_dependency, paper_id: str):
             )
         arxiv_review = ReviewArxivPaper()
         score = arxiv_review.process(paper)
-        logger.info(f'hey: {score}')
         if not score:
             logger.error(f"Failed to process paper with ID {paper_id}")
             return StandardResponse(

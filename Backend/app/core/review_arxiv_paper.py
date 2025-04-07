@@ -122,7 +122,7 @@ class BaseAssistant:
             db = next(self._get_db())
             sota_context_list =[]
             # 根据top 3 的关键字（节约上下文），先从数据库中获取相关的知识
-            for keyword in keywords.split(',')[:3]:
+            for keyword in keywords[:3]:
                 sota_context = db.query(SOTAContext).filter(SOTAContext.keyword == keyword).first()
                 if sota_context and sota_context.research_context:
                     sota_context_list.append(sota_context.research_context)
@@ -792,10 +792,8 @@ class ReviewArxivPaper():
             
             # 1. 让AI总结论文的几个关键问题, 以及答案，辅助推理
             if topic_result:
-                if publication.keywords:
-                    publication.keywords =','.join(topic_result.get('keywords', 'N/A'))
-                if publication.research_topics:
-                    publication.research_topics = ','.join(topic_result.get('research_topics', ''))
+                publication.keywords =topic_result.get('keywords', [])
+                publication.research_topics = topic_result.get('research_topics', [])    
             
             traige_assistant_config = PaperReviewConfig.ai_assistants_config[AIAssistantType.PAPER_TRIAGE]
             traige_assistant = TraigeAssistant(traige_assistant_config)

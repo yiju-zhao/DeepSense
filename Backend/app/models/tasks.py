@@ -119,6 +119,9 @@ class Publication(SQLModel, table=True):
     attachment_url: Optional[str] = Field(default=None, max_length=255, description="附件的在线访问链接，最大长度为255字符")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="创建时间")
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="更新时间")
+    
+    scores: Optional["PaperScores"] = Relationship(back_populates="publication")
+    
     class Config:
         from_attributes = True
     
@@ -148,7 +151,7 @@ class PaperScores(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True, description="ID,主键,自增")
     paper_id: str = Field(
         ..., 
-        max_length=255, unique=True, index=True, 
+        max_length=255, unique=True, index=True, foreign_key="publication.paper_id",
         description="唯一的论文ID"
     )
     title: str = Field(..., description="论文的标题")
@@ -173,6 +176,9 @@ class PaperScores(SQLModel, table=True):
     log: Optional[str] = Field(default=None, description="执行日志")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="创建时间")
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="更新时间")
+    
+    # 定义反向关系（可选）
+    publication: Optional["Publication"] = Relationship(back_populates="scores")
     
     class Config:
         from_attributes = True
@@ -221,7 +227,7 @@ class StandardResponse(BaseModel):
     message: str
     data: Optional[Any] = None
     task_id: Optional[str] = None  # Make task_id optional
-
+  
 class TaskExecutionResponse(BaseModel):
     id: int
     task_id: int
