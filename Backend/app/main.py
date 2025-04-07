@@ -21,6 +21,7 @@ logging.basicConfig(
 # Create logger for this module
 logger = logging.getLogger(__name__)
 
+# Initialize FastAPI app first
 app = FastAPI()
 models.Base.metadata.create_all(bind=engine)
 
@@ -38,6 +39,10 @@ app.add_middleware(
 
 # Register API router
 app.include_router(api_router, prefix="/api/v1")
+
+# Then include the frontend adapter router
+from api.routes.frontend_adapter import router as frontend_adapter_router
+app.include_router(frontend_adapter_router, prefix="/api/v1")
 
 class ConferenceBase(BaseModel):
     name: str
