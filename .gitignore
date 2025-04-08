@@ -175,3 +175,6 @@ cython_debug/
 
 *.code-workspace
 node_modules/
+
+data/
+*.pdf
