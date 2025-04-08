@@ -2,12 +2,12 @@
 python_arXiv_parsing_example.py
 
 This sample script illustrates a basic arXiv api call
-followed by parsing of the results using the 
+followed by parsing of the results using the
 feedparser python module.
 
-Please see the documentation at 
+Please see the documentation at
 http://export.arxiv.org/api_help/docs/user-manual.html
-for more information, or email the arXiv api 
+for more information, or email the arXiv api
 mailing list at arxiv-api@googlegroups.com.
 
 urllib is included in the standard python library.
@@ -33,14 +33,12 @@ import xml.etree.ElementTree as ET
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('app.log')
-    ]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler("app.log")],
 )
 # Create logger for this module
 logger = logging.getLogger(__name__)
+
 
 class ArxivApiArgs(ApiArgs):
     search_query: str
@@ -48,6 +46,7 @@ class ArxivApiArgs(ApiArgs):
     max_results: int
     sortBy: Optional[str] = None
     sortOrder: Optional[str] = None
+
 
 class ArxivCrawler(BaseCrawler):
     def get_api_response(self, url: str, args: ArxivApiArgs) -> Dict[str, Any]:
@@ -65,17 +64,17 @@ class ArxivCrawler(BaseCrawler):
             sort_order = "descending"  # 可以设置默认值
         else:
             sort_order = args.sortOrder
-        query = f'search_query={args.search_query}&start={args.start}&max_results={args.max_results}&sortBy={sort_by}&sortOrder={sort_order}'
-        logger.info(f'featch the api response from:{url}{query}')
+        query = f"search_query={args.search_query}&start={args.start}&max_results={args.max_results}&sortBy={sort_by}&sortOrder={sort_order}"
+        logger.info(f"featch the api response from:{url}{query}")
         # perform a GET request using the base_url and query
         response = requests.get(url + query)
         xml_data = response.text  # 这是原始的 XML 字符串
         # dummy_data = get_arxiv_dummy_data()
         # 解析 XML 数据, 为什么不用 feedparser 解析呢？-- 它不能很好地处理affiliation, 因此定制一个解析函数parse_arxiv_feed
-        #TODO 还要考虑分页的情况，当前可以简单地将 max_results 设置为 1000
+        # TODO 还要考虑分页的情况，当前可以简单地将 max_results 设置为 1000
         result = self.parse_arxiv_feed(xml_data)
         return result
-    
+
     @staticmethod
     def parse_arxiv_feed(xml_data: str) -> dict:
         """
@@ -88,7 +87,7 @@ class ArxivCrawler(BaseCrawler):
         ns = {
             "atom": "http://www.w3.org/2005/Atom",
             "opensearch": "http://a9.com/-/spec/opensearch/1.1/",
-            "arxiv": "http://arxiv.org/schemas/atom"
+            "arxiv": "http://arxiv.org/schemas/atom",
         }
         root = ET.fromstring(xml_data)
 
@@ -97,14 +96,18 @@ class ArxivCrawler(BaseCrawler):
             "updated": root.find("atom:updated", ns).text,
             "total_results": root.find("opensearch:totalResults", ns).text,
             "items_per_page": root.find("opensearch:itemsPerPage", ns).text,
-            "start_index": root.find("opensearch:startIndex", ns).text
+            "start_index": root.find("opensearch:startIndex", ns).text,
         }
 
         papers = []
         for entry in root.findall("atom:entry", ns):
             # 提取 primary_category
             primary_category_elem = entry.find("arxiv:primary_category", ns)
-            primary_category = primary_category_elem.attrib.get("term") if primary_category_elem is not None else None
+            primary_category = (
+                primary_category_elem.attrib.get("term")
+                if primary_category_elem is not None
+                else None
+            )
 
             # 提取所有 category（默认命名空间下）
             categories = []
@@ -115,20 +118,28 @@ class ArxivCrawler(BaseCrawler):
             # find PDF url: <link title="pdf" href="http://arxiv.org/pdf/1504.01441v3" rel="related" type="application/pdf"/>
             pdf_url = ""
             for link in entry.findall("atom:link", ns):
-                if (link.attrib.get("type") == "application/pdf" and 
-                    link.attrib.get("title") == "pdf"):
+                if (
+                    link.attrib.get("type") == "application/pdf"
+                    and link.attrib.get("title") == "pdf"
+                ):
                     pdf_url = link.attrib["href"]
                     break  # 找到就跳出循环
-        
+
             paper = {
-                "arxiv_id": entry.find("atom:id", ns).text.rsplit('/', 1)[-1], # 只保留数字ID部分：比如1504.01441v3
+                "arxiv_id": entry.find("atom:id", ns).text.rsplit("/", 1)[
+                    -1
+                ],  # 只保留数字ID部分：比如1504.01441v3
                 "title": entry.find("atom:title", ns).text,
                 "pdf_url": pdf_url,
                 "published": entry.find("atom:published", ns).text,
-                "summary": entry.find("atom:summary", ns).text.strip() if entry.find("atom:summary", ns) is not None else "",
+                "summary": (
+                    entry.find("atom:summary", ns).text.strip()
+                    if entry.find("atom:summary", ns) is not None
+                    else ""
+                ),
                 "authors": [],
                 "primary_category": primary_category,
-                "categories": categories
+                "categories": categories,
             }
             for author in entry.findall("atom:author", ns):
                 name = author.find("atom:name", ns).text
@@ -136,10 +147,8 @@ class ArxivCrawler(BaseCrawler):
                 paper["authors"].append({"name": name, "affiliations": aff_list})
             papers.append(paper)
 
-        return {
-            "feed_info": feed_info,
-            "papers": papers
-        }
+        return {"feed_info": feed_info, "papers": papers}
+
 
 def get_arxiv_dummy_data():
     try:
@@ -150,23 +159,19 @@ def get_arxiv_dummy_data():
         # Check if file exists
         if not os.path.exists(file_path):
             logger.error(f"File not found: {file_path}")
-            raise FileNotFoundError(f"Could not find arxiv_dummy_data.xml at {file_path}")
+            raise FileNotFoundError(
+                f"Could not find arxiv_dummy_data.xml at {file_path}"
+            )
         # Read and validate file content
         with open(file_path, "r", encoding="utf-8") as file:
             response = file.read()
-            
+
         if not response:
             logger.error("File is empty")
             raise ValueError("arxiv_dummy_data.xml is empty")
-            
+
         logger.info(f"Successfully read {len(response)} bytes from file")
         return response
-    
+
     except Exception as e:
         logger.error(f"Error simulating network delay: {e}")
-    
-
-
-
-
-
