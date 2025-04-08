@@ -3,8 +3,8 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
-from app.db.base import Base
-from app.core.exceptions import NotFoundException
+from db.base import Base
+from core.exceptions import NotFoundException
 
 ModelType = TypeVar("ModelType", bound=Base)
 CreateSchemaType = TypeVar("CreateSchemaType", bound=BaseModel)

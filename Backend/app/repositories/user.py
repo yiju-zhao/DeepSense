@@ -2,9 +2,9 @@ from typing import Optional, List
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.user import User
-from app.repositories.base import BaseRepository
-from app.schemas.user import UserCreate, UserUpdate
+from models.user import User
+from repositories.base import BaseRepository
+from schemas.user import UserCreate, UserUpdate
 
 
 class UserRepository(BaseRepository[User, UserCreate, UserUpdate]):
