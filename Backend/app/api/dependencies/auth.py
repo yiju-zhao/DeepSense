@@ -5,12 +5,12 @@ from jose import jwt, JWTError
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
-from app.core.security import verify_password
-from app.db.session import get_async_session
-from app.models.user import User
-from app.schemas.user import User as UserSchema
-from app.services.user import UserService
+from core.config import settings
+from core.security import verify_password
+from db.session import get_async_session
+from models.user import User
+from schemas.user import User as UserSchema
+from services.user import UserService
 
 # OAuth2 scheme for token authentication
 oauth2_scheme = OAuth2PasswordBearer(
