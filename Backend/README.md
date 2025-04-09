@@ -35,12 +35,9 @@ pip install -r requirements.txt
 4. Set up environment variables:
 Create a `.env` file in the `app` directory with the following content:
 ```env
-SECRET_KEY=your-secret-key-here
+DATABASE_URL=your-database-url-here
+OPENAI_API_KEY=your-openai-api-key-here
 ```
-
-5. Initialize the database:
-Download postgres and create a database.
-Configure the database in `config.py` file.
 
 <!-- 5. Initialize the database:
 ```bash
