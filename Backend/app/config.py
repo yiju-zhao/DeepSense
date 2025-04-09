@@ -1,13 +1,11 @@
 # 数据库配置
 from pathlib import Path
+from dotenv import load_dotenv
+import os
 
-DB_USER = "postgres"
-DB_PASSWORD = "nasa718"
-DB_HOST = "localhost"
-DB_PORT = "5432"
-DB_NAME = "test_db_2"
+load_dotenv()
 
-DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # PDF 文件存储路径, 可以直接指定该路径（完整），也可以等待自动创建
 __DATA_STORAGE_DIR = ""

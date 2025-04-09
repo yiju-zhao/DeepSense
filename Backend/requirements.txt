@@ -132,3 +132,6 @@ websockets==15.0.1
 xlrd==2.0.1
 XlsxWriter==3.2.2
 youtube-transcript-api==1.0.3
+dotenv==0.9.9
+asyncpg
+greenlet==3.0.3

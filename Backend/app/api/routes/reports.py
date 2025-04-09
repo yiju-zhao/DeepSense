@@ -2,25 +2,21 @@ from datetime import date, datetime
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, desc
 
-from database import SessionLocal
+from database import get_db
 from models.tasks import ArxivPaper, PaperScores, Publication, StandardResponse
 from core.review_arxiv_paper import ReviewArxivPaper
 
 import logging
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-db_dependency = Annotated[Session, Depends(get_db)]
+# Use the async get_db dependency
+db_dependency = Annotated[AsyncSession, Depends(get_db)]
 
 
 @router.get("/daily", response_model=StandardResponse)
@@ -35,42 +31,42 @@ async def get_daily_report(
     """
     if not date:
         date = datetime.now().date()
-    
+
     logger.info(f"Generating daily report for date: {date}")
-    
+
     # Get publications for the specified date
-    publication_list = (
-        db.query(Publication)
+    query = (
+        select(Publication)
         .filter(
             Publication.paper_id != None,
             Publication.publish_date >= date,
             Publication.publish_date <= date,
         )
-        .limit(10)  # Top 10 publications for the day
-        .all()
-    )
-    
+        .limit(10)
+    )  # Top 10 publications for the day
+
+    result = await db.execute(query)
+    publication_list = result.scalars().all()
+
     if not publication_list:
         return StandardResponse(
-            success=False, 
-            message=f"No publications found for {date}", 
-            data={}
+            success=False, message=f"No publications found for {date}", data={}
         )
-    
+
     logger.info(f"Found {len(publication_list)} publications for daily report")
-    
+
     # Get enhanced publication data with scores
     publication_data = []
     for publication in publication_list:
-        arxiv_paper = (
-            db.query(ArxivPaper)
-            .filter(ArxivPaper.arxiv_id == publication.paper_id)
-            .first()
+        arxiv_query = select(ArxivPaper).filter(
+            ArxivPaper.arxiv_id == publication.paper_id
         )
-        
+        arxiv_result = await db.execute(arxiv_query)
+        arxiv_paper = arxiv_result.scalar_one_or_none()
+
         if not arxiv_paper:
             continue
-            
+
         publication_info = {
             "publication_id": publication.paper_id,
             "publish_date": publication.publish_date,
@@ -98,20 +94,8 @@ async def get_daily_report(
         reverse=True,
     )
 
-    top_publications = sorted_publications[:10]
-    total_count = len(top_publications)
-    
-    # Generate AI report summarizing the top publications
-    logger.info(f"Generating AI report for {total_count} publications")
-    arxiv_review = ReviewArxivPaper()
-    report = arxiv_review.get_ai_daily_report(
-        report_day=date, 
-        top_k=total_count, 
-        context=str(top_publications)
-    )
-    
     return StandardResponse(
         success=True,
-        message=f"Daily report generated for {date}",
-        data=report,
-    ) 
+        message=f"Daily report for {date}",
+        data={"publications": sorted_publications},
+    )

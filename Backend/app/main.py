@@ -1,13 +1,14 @@
 import sys
 from fastapi import FastAPI, HTTPException, Depends
 from typing import Annotated
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, ConfigDict
-from database import SessionLocal, engine, Base
+from database import SessionLocal, engine, Base, get_db
 import models.models as models
 from fastapi.middleware.cors import CORSMiddleware
 from api import api_router
 import logging
+import asyncio
 from db_init import init_db
 
 # Import all SQLAlchemy models to ensure they're registered with metadata
@@ -33,8 +34,12 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+
 # Initialize database
-init_db()
+@app.on_event("startup")
+async def startup_event():
+    await init_db()
+
 
 origins = [
     "*",
@@ -64,23 +69,16 @@ class ConferenceModel(ConferenceBase):
     model_config = ConfigDict(from_attributes=True)
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-db_dependency = Annotated[Session, Depends(get_db)]
+# Use the async get_db dependency
+db_dependency = Annotated[AsyncSession, Depends(get_db)]
 
 
 @app.post("/conferences", response_model=ConferenceModel)
 async def create_conference(db: db_dependency, conference: ConferenceBase):
     db_conference = models.Conference(**conference.model_dump())
     db.add(db_conference)
-    db.commit()
-    db.refresh(db_conference)
+    await db.commit()
+    await db.refresh(db_conference)
     return db_conference
 
 

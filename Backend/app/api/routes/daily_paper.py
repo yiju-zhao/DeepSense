@@ -354,7 +354,9 @@ async def get_daily_report(
         .all()
     )
     if not publication_list:
-        return StandardResponse(success=False, message="No papers found for this date", data={})
+        return StandardResponse(
+            success=False, message="No papers found for this date", data={}
+        )
     logger.info(f"query table Publication and found {len(publication_list)} records")
     return_data = []
     for publication in publication_list:
@@ -443,9 +445,7 @@ async def review_paper(db: db_dependency, paper_id: str):
         paper = db.query(ArxivPaper).filter(ArxivPaper.arxiv_id == paper_id).first()
         if not paper:
             logger.error(f"Paper with ID {paper_id} not found")
-            return StandardResponse(
-                success=False, message=f"Paper not found", data={}
-            )
+            return StandardResponse(success=False, message=f"Paper not found", data={})
         arxiv_review = ReviewArxivPaper()
         score = arxiv_review.process(paper)
         if not score:

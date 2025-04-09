@@ -2,25 +2,21 @@ from datetime import date, datetime
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import Query
+from sqlalchemy import select, desc, asc
 
-from database import SessionLocal
+from database import get_db
 from models.tasks import ArxivPaper, PaperScores, Publication, StandardResponse
 
 router = APIRouter(prefix="/publications", tags=["publications"])
 
 import logging
+
 logger = logging.getLogger(__name__)
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-db_dependency = Annotated[Session, Depends(get_db)]
+# Use the async get_db dependency
+db_dependency = Annotated[AsyncSession, Depends(get_db)]
 
 
 @router.get("/{publication_id}", response_model=StandardResponse)
@@ -28,14 +24,20 @@ async def get_publication(db: db_dependency, publication_id: str):
     """
     Retrieve a specific publication by ID with its evaluation scores
     """
-    publication = (
-        db.query(Publication)
+    # Use select statements for async queries
+    publication_query = (
+        select(Publication)
         .outerjoin(PaperScores, Publication.paper_id == PaperScores.paper_id)
         .filter(Publication.paper_id == publication_id)
-        .first()
     )
-    # NOTE: ArxivPaper contains metadata like authors and affiliations not yet in Publication
-    arxiv_paper = db.query(ArxivPaper).filter(ArxivPaper.arxiv_id == publication_id).first()
+
+    publication_result = await db.execute(publication_query)
+    publication = publication_result.scalar_one_or_none()
+
+    # Query for ArxivPaper
+    arxiv_query = select(ArxivPaper).filter(ArxivPaper.arxiv_id == publication_id)
+    arxiv_result = await db.execute(arxiv_query)
+    arxiv_paper = arxiv_result.scalar_one_or_none()
 
     if publication and arxiv_paper:
         # Avoid returning large raw text fields
@@ -66,9 +68,7 @@ async def get_publication(db: db_dependency, publication_id: str):
             data=return_data,
         )
     else:
-        return StandardResponse(
-            success=False, message="Publication not found", data={}
-        )
+        return StandardResponse(success=False, message="Publication not found", data={})
 
 
 @router.get("", response_model=StandardResponse)
@@ -99,64 +99,60 @@ async def get_publications(
     if not end_date:
         end_date = datetime.now().date()
 
-    publication_list = (
-        db.query(Publication)
+    # Build the query
+    query = (
+        select(Publication)
+        .outerjoin(PaperScores, Publication.paper_id == PaperScores.paper_id)
         .filter(
-            Publication.paper_id != None,
-            Publication.publish_date >= start_date,
-            Publication.publish_date <= end_date,
+            Publication.publish_date >= start_date, Publication.publish_date <= end_date
         )
-        .offset(skip)
-        .limit(limit)
-        .all()
     )
 
-    if not publication_list:
-        return StandardResponse(success=False, message="No publications found", data={})
-    
-    logger.info(f"Found {len(publication_list)} publications matching criteria")
-    return_data = []
-    
-    for publication in publication_list:
-        arxiv_paper = (
-            db.query(ArxivPaper)
-            .filter(ArxivPaper.arxiv_id == publication.paper_id)
-            .first()
-        )
-        
-        if not arxiv_paper:
-            continue
-            
-        item_data = {
-            "publication_id": publication.paper_id,
-            "publish_date": publication.publish_date,
-            "title": publication.title,
-            "pdf_url": publication.pdf_url,
-            "abstract": publication.abstract,
-            "author": arxiv_paper.authors,
-            "conclusion": publication.conclusion,
-            "traige_qa": publication.triage_qa,
+    # Apply sorting
+    if sort_by == "weighted_score":
+        if order == "desc":
+            query = query.order_by(desc(PaperScores.weighted_score))
+        else:
+            query = query.order_by(asc(PaperScores.weighted_score))
+    else:  # Default to publish_date
+        if order == "desc":
+            query = query.order_by(desc(Publication.publish_date))
+        else:
+            query = query.order_by(asc(Publication.publish_date))
+
+    # Apply pagination
+    query = query.offset(skip).limit(limit)
+
+    # Execute the query
+    result = await db.execute(query)
+    publications = result.scalars().all()
+
+    # Format the response
+    publications_data = []
+    for pub in publications:
+        # Avoid returning large raw text fields
+        pub.content_raw_text = ""
+        pub.reference_raw_text = ""
+
+        pub_data = {
+            "publication_id": pub.paper_id,
+            "publish_date": pub.publish_date,
+            "title": pub.title,
+            "pdf_url": pub.pdf_url,
+            "abstract": pub.abstract,
+            "conclusion": pub.conclusion,
+            "traige_qa": pub.triage_qa,
             "scores": (
-                publication.scores
-                if publication.scores
+                pub.scores
+                if pub.scores
                 else "{'review_status':'pending','error_message':'not processed yet'}"
             ),
-            "weighted_score": (
-                publication.scores.weighted_score if publication.scores else 0
-            ),
+            "weighted_score": (pub.scores.weighted_score if pub.scores else 0),
         }
-        return_data.append(item_data)
+        publications_data.append(pub_data)
 
-    # Sort publications by weighted score (highest first) then by date
-    sorted_data = sorted(
-        return_data,
-        key=lambda x: (x["weighted_score"], x["publish_date"]),
-        reverse=True if order.lower() == "desc" else False,
-    )
-
-    total_count = len(sorted_data)
     return StandardResponse(
         success=True,
-        message=f"Retrieved {total_count} publications",
-        data={"publications": sorted_data, "count": total_count},
-    ) 
+        message=f"Retrieved {len(publications_data)} publications",
+        data={"publications": publications_data},
+    )

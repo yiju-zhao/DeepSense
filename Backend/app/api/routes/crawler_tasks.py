@@ -1,10 +1,11 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
-from database import SessionLocal
+from database import get_db
 from models.tasks import (
     ArxivPaper,
     CrawlerTask,
@@ -21,42 +22,41 @@ from models.tasks import (
 from core.arxiv_crawler import ArxivApiArgs, ArxivCrawler
 
 import logging
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/crawler", tags=["crawler"])
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-db_dependency = Annotated[Session, Depends(get_db)]
+# Use the async get_db dependency
+db_dependency = Annotated[AsyncSession, Depends(get_db)]
 
 
 @router.get("/tasks", response_model=CrawlerTaskList)
-def get_tasks(db: db_dependency, skip: int = Query(0), limit: int = Query(100)):
+async def get_tasks(db: db_dependency, skip: int = Query(0), limit: int = Query(100)):
     """
     Retrieve all crawler tasks with pagination
     """
-    tasks = db.query(CrawlerTask).offset(skip).limit(limit).all()
+    query = select(CrawlerTask).offset(skip).limit(limit)
+    result = await db.execute(query)
+    tasks = result.scalars().all()
     return CrawlerTaskList(data=tasks, count=len(tasks))
 
 
 @router.get("/tasks/{task_id}", response_model=CrawlerTaskResponse)
-def get_task(db: db_dependency, task_id: int):
+async def get_task(db: db_dependency, task_id: int):
     """
     Retrieve a specific crawler task by ID
     """
-    task = db.query(CrawlerTask).filter(CrawlerTask.id == task_id).first()
+    query = select(CrawlerTask).filter(CrawlerTask.id == task_id)
+    result = await db.execute(query)
+    task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
 
 
 @router.post("/tasks", response_model=CrawlerTaskResponse)
-def create_task(db: db_dependency, task: CrawlerTaskCreate):
+async def create_task(db: db_dependency, task: CrawlerTaskCreate):
     """
     Create a new crawler task
     """
@@ -75,41 +75,42 @@ def create_task(db: db_dependency, task: CrawlerTaskCreate):
         updated_at=datetime.now(),
     )
     db.add(new_task)
-    db.commit()
-    db.refresh(new_task)
+    await db.commit()
+    await db.refresh(new_task)
     return new_task
 
 
 @router.put("/tasks/{task_id}", response_model=CrawlerTaskResponse)
-def update_task(db: db_dependency, task_id: int, task_update: CrawlerTaskUpdate):
+async def update_task(db: db_dependency, task_id: int, task_update: CrawlerTaskUpdate):
     """
     Update an existing crawler task
     """
-    task = db.query(CrawlerTask).filter(CrawlerTask.id == task_id).first()
+    query = select(CrawlerTask).filter(CrawlerTask.id == task_id)
+    result = await db.execute(query)
+    task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
     update_data = task_update.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(task, key, value)
-    
+
     task.updated_at = datetime.now()
-    db.commit()
-    db.refresh(task)
+    await db.commit()
+    await db.refresh(task)
     return task
 
 
 @router.post("/tasks/{task_id}/{action}", response_model=CrawlerTaskActionResponse)
 async def execute_task_action(
-    db: db_dependency, 
-    task_id: int, 
-    action: str, 
-    background_tasks: BackgroundTasks
+    db: db_dependency, task_id: int, action: str, background_tasks: BackgroundTasks
 ):
     """
     Execute an action on a crawler task (start, stop, delete)
     """
-    task = db.query(CrawlerTask).filter(CrawlerTask.id == task_id).first()
+    query = select(CrawlerTask).filter(CrawlerTask.id == task_id)
+    result = await db.execute(query)
+    task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -125,10 +126,10 @@ async def execute_task_action(
             raise HTTPException(status_code=400, detail="Task is not running")
         task.status = TaskStatus.stopped.value
         task.end_time = datetime.now()
-        
+
     elif action == "delete":
-        db.delete(task)
-        db.commit()
+        await db.delete(task)
+        await db.commit()
         return {
             "success": True,
             "message": "Task deleted successfully",
@@ -137,7 +138,7 @@ async def execute_task_action(
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
 
-    db.commit()
+    await db.commit()
     return {
         "success": True,
         "message": f"Task {action}ed successfully",
@@ -146,210 +147,191 @@ async def execute_task_action(
 
 
 @router.get("/executions", response_model=TaskExecutionList)
-def get_task_executions(
+async def get_task_executions(
     db: db_dependency,
     skip: int = Query(0, ge=0),
     limit: int = Query(10, ge=1, le=100),
     task_id: Optional[int] = Query(None, description="Filter by task ID"),
 ):
     """
-    Get execution history for crawler tasks with optional filtering
+    Retrieve task executions with pagination and optional filtering by task ID
     """
-    query = db.query(TaskExecution)
-
-    if task_id is not None:
+    query = select(TaskExecution)
+    if task_id:
         query = query.filter(TaskExecution.task_id == task_id)
 
-    total_count = query.count()
-    executions = (
-        query.order_by(TaskExecution.created_at.desc()).offset(skip).limit(limit).all()
-    )
+    query = query.offset(skip).limit(limit)
+    result = await db.execute(query)
+    executions = result.scalars().all()
 
-    return TaskExecutionList(data=executions, count=total_count)
+    return TaskExecutionList(data=executions, count=len(executions))
 
 
 @router.get("/executions/{execution_id}", response_model=TaskExecutionResponse)
-def get_task_execution(db: db_dependency, execution_id: int):
+async def get_task_execution(db: db_dependency, execution_id: int):
     """
-    Get details of a specific task execution
+    Retrieve a specific task execution by ID
     """
-    execution = db.query(TaskExecution).filter(TaskExecution.id == execution_id).first()
+    query = select(TaskExecution).filter(TaskExecution.id == execution_id)
+    result = await db.execute(query)
+    execution = result.scalar_one_or_none()
     if not execution:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Task execution with ID {execution_id} not found",
-        )
+        raise HTTPException(status_code=404, detail="Task execution not found")
     return execution
 
 
-# Helper functions for task execution
 def append_log(current_log: str, new_message: str) -> str:
-    """Helper function to append messages to execution log"""
-    if current_log:
-        return f"{current_log}\n{new_message}"
-    return new_message
+    """
+    Append a new message to the current log with timestamp
+    """
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return (
+        f"{current_log}\n[{timestamp}] {new_message}"
+        if current_log
+        else f"[{timestamp}] {new_message}"
+    )
 
 
 async def execute_task(task_id: int):
     """
-    Background function to execute a crawler task
+    Execute a crawler task asynchronously
     """
-    db = next(get_db())
-    try:
-        logger.info(f"Starting task execution: {task_id}")
-        task = db.query(CrawlerTask).filter(CrawlerTask.id == task_id).first()
+    # Create a new database session for this background task
+    async with AsyncSession(engine) as db:
+        # Get the task
+        query = select(CrawlerTask).filter(CrawlerTask.id == task_id)
+        result = await db.execute(query)
+        task = result.scalar_one_or_none()
+
         if not task:
-            logger.error(f"Task not found: {task_id}")
+            logger.error(f"Task {task_id} not found")
             return
 
-        # Create execution record
+        # Create a new task execution record
         execution = TaskExecution(
             task_id=task_id,
-            status=TaskStatus.pending.value,
-            start_time=datetime.now(timezone.utc),
-            created_at=datetime.now(timezone.utc),
+            start_time=datetime.now(),
+            status=TaskStatus.running,
+            log="Task execution started",
         )
         db.add(execution)
-
-        # Get task function
-        func = task_function_mapping.get(task.function_name)
-        logger.info(f"Using task function: {task.function_name}")
-        if not func:
-            task.status = TaskStatus.failed.value
-            execution.log = append_log(
-                execution.log, f"Function not found: {task.function_name}"
-            )
-            db.commit()
-            return
-
-        # Update status to running
-        task.status = TaskStatus.running.value
-        task.start_time = datetime.now()
-        execution.status = TaskStatus.running.value
-        execution.log = append_log(execution.log, f"Task started: {task.name}")
-        execution.log = append_log(execution.log, f"Parameters: {task.parameters}")
-        db.commit()
-
-        # Execute the task function
-        result = func(task)
-
-        if result.get("status") == "error":
-            raise Exception(result.get("message"))
-            
-        execution.log = append_log(execution.log, "Task executed successfully")
-        execution.status = TaskStatus.completed.value
-        execution.end_time = datetime.now()
-
-        # Update task status
-        task.status = TaskStatus.completed.value
-        task.end_time = datetime.now()
-        logger.info(f"Task completed: {task.name}")
-
-        # Process and store results
-        logger.info("Storing results in database")
-        execution.log = append_log(execution.log, "Storing results in database")
-        
-        if result.get("data") and result.get("data").get("papers"):
-            papers_count = 0
-            duplicate_count = 0
-            total_count = len(result.get("data").get("papers"))
-            logger.info(f"Found {total_count} papers to process")
-            
-            for paper_data in result.get("data").get("papers"):
-                # Check for duplicates
-                logger.info(f"Processing paper: {paper_data.get('arxiv_id')}")
-                existing_paper = (
-                    db.query(ArxivPaper)
-                    .filter(ArxivPaper.arxiv_id == paper_data.get("arxiv_id"))
-                    .first()
-                )
-                
-                if existing_paper:
-                    logger.info(f"Skipping duplicate paper: {paper_data.get('arxiv_id')}")
-                    execution.log = append_log(
-                        execution.log, f"Skipping duplicate paper: {paper_data.get('arxiv_id')}"
-                    )
-                    duplicate_count += 1
-                    continue
-                
-                # Create new paper record
-                logger.info(f"Saving paper: {paper_data.get('arxiv_id')}")
-                execution.log = append_log(
-                    execution.log, f"Saving paper: {paper_data.get('arxiv_id')}"
-                )
-                new_paper = ArxivPaper(
-                    arxiv_id=paper_data.get("arxiv_id"),
-                    title=paper_data.get("title"),
-                    pdf_url=paper_data.get("pdf_url"),
-                    published=paper_data.get("published"),
-                    summary=paper_data.get("summary"),
-                    authors=paper_data.get("authors"),
-                    primary_category=paper_data.get("primary_category"),
-                    categories=paper_data.get("categories"),
-                    created_at=datetime.now(timezone.utc),
-                    updated_at=datetime.now(timezone.utc),
-                )
-                db.add(new_paper)
-                papers_count += 1
-
-            db.commit()
-            execution.log = append_log(
-                execution.log,
-                f"Saved {papers_count} papers to database, skipped {duplicate_count} duplicates"
-            )
-            logger.info(
-                f"Saved {papers_count} papers to database, skipped {duplicate_count} duplicates"
-            )
-        else:
-            logger.info("No papers found to save")
-            execution.log = append_log(execution.log, "No papers found to save")
-
-    except Exception as e:
-        # Handle failures
-        if 'execution' in locals():
-            execution.status = TaskStatus.failed.value
-            execution.end_time = datetime.now()
-            execution.log = append_log(execution.log, str(e))
-        logger.error(f"Error executing task {task_id}: {str(e)}")
-
-        if 'task' in locals():
-            task.status = TaskStatus.failed.value
-    finally:
-        # Update last run time and handle repeating tasks
-        if 'task' in locals():
-            task.last_run_time = datetime.now()
-            if task.repeat_type:
-                task.update_next_run_time()
-                task.status = TaskStatus.pending.value
+        await db.commit()
+        await db.refresh(execution)
 
         try:
-            db.commit()
+            # Update task status to running
+            task.status = TaskStatus.running
+            task.last_run_time = datetime.now()
+            await db.commit()
+
+            # Execute the task based on its function_name
+            if task.function_name == "crawl_arxiv":
+                # Parse parameters
+                params = task.parameters
+                if not params:
+                    raise ValueError("No parameters provided for crawl_arxiv task")
+
+                # Create ArxivApiArgs from parameters
+                api_args = ArxivApiArgs(
+                    query=params.get("query", ""),
+                    max_results=params.get("max_results", 10),
+                    sort_by=params.get("sort_by", "submittedDate"),
+                    sort_order=params.get("sort_order", "descending"),
+                    start_date=params.get("start_date"),
+                    end_date=params.get("end_date"),
+                )
+
+                # Create and run the crawler
+                crawler = ArxivCrawler(api_args)
+                papers = await crawler.crawl()
+
+                # Process the results
+                for paper in papers:
+                    # Check if paper already exists
+                    paper_query = select(ArxivPaper).filter(
+                        ArxivPaper.arxiv_id == paper.arxiv_id
+                    )
+                    paper_result = await db.execute(paper_query)
+                    existing_paper = paper_result.scalar_one_or_none()
+
+                    if not existing_paper:
+                        # Create new paper record
+                        new_paper = ArxivPaper(
+                            arxiv_id=paper.arxiv_id,
+                            title=paper.title,
+                            authors=paper.authors,
+                            abstract=paper.abstract,
+                            pdf_url=paper.pdf_url,
+                            published=paper.published,
+                            updated=paper.updated,
+                            categories=paper.categories,
+                        )
+                        db.add(new_paper)
+
+                # Update execution log
+                execution.log = append_log(
+                    execution.log, f"Successfully crawled {len(papers)} papers"
+                )
+                execution.status = TaskStatus.completed
+            else:
+                execution.log = append_log(
+                    execution.log, f"Unknown function: {task.function_name}"
+                )
+                execution.status = TaskStatus.failed
         except Exception as e:
-            logger.error(f"Error committing changes: {str(e)}")
-            db.rollback()
+            logger.exception(f"Error executing task {task_id}: {str(e)}")
+            execution.log = append_log(execution.log, f"Error: {str(e)}")
+            execution.status = TaskStatus.failed
+            task.status = TaskStatus.failed
         finally:
-            db.close()
+            # Update execution end time
+            execution.end_time = datetime.now()
+            await db.commit()
+
+            # Update task status and next run time
+            if task.repeat_type and task.status != TaskStatus.failed:
+                # Calculate next run time based on repeat settings
+                if task.repeat_type == "daily":
+                    task.next_run_time = datetime.now() + timedelta(days=1)
+                elif task.repeat_type == "weekly":
+                    task.next_run_time = datetime.now() + timedelta(weeks=1)
+                elif task.repeat_type == "monthly":
+                    # Simple month addition (not perfect for month boundaries)
+                    next_month = datetime.now().month + 1
+                    next_year = datetime.now().year
+                    if next_month > 12:
+                        next_month = 1
+                        next_year += 1
+                    task.next_run_time = datetime(
+                        next_year, next_month, datetime.now().day
+                    )
+
+                task.status = TaskStatus.pending
+            else:
+                task.status = TaskStatus.completed
+
+            await db.commit()
 
 
 def crawl_arxiv(task: CrawlerTask):
     """
     Function to crawl papers from arXiv
-    
+
     Args:
         task: The crawler task containing parameters
-    
+
     Returns:
         dict: Result of the crawling operation
     """
     try:
         crawler = ArxivCrawler()
         logger.info(f"Crawling arXiv data, task_id={task.id}")
-        
+
         # Get URL parameter
         url = task.parameters.get("url", "")
         if not url:
             raise ValueError("URL is required")
-            
+
         # Other parameters
         args = ArxivApiArgs(
             search_query=task.parameters.get("query", ""),
@@ -358,14 +340,14 @@ def crawl_arxiv(task: CrawlerTask):
             sortBy=task.parameters.get("sortBy", "submittedDate"),
             sortOrder=task.parameters.get("sortOrder", "descending"),
         )
-        
+
         logger.info(f"Crawler parameters: url={url}, args={args}")
-        
+
         # Execute API call
         results = crawler.get_api_response(url, args)
         if not results:
             raise ValueError("No results found")
-            
+
         return {
             "status": "success",
             "message": "Crawling completed successfully",
@@ -379,4 +361,4 @@ def crawl_arxiv(task: CrawlerTask):
 # Map task function names to functions
 task_function_mapping = {
     "crawl_arxiv": crawl_arxiv,
-} 
+}
