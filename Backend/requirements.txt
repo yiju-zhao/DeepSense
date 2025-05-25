@@ -116,7 +116,7 @@ streamlit==1.44.0
 sympy==1.13.3
 tenacity==9.0.0
 toml==0.10.2
-tornado==6.4.2
+tornado>=6.5
 tqdm==4.67.1
 traitlets==5.14.3
 typing-inspection==0.4.0
